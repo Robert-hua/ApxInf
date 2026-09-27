@@ -23,11 +23,11 @@ fn load(
         || options.synthetic.is_some()
         || !matches!(
             options.model_variant.as_deref(),
-            None | Some("f32") | Some("tf32") | Some("bf16")
+            None | Some("f32") | Some("tf32") | Some("bf16") | Some("fp8_dynamic")
         )
     {
         return Err(Error::Other(
-            "Diffusion supports checkpoint-native config and f32/tf32/bf16 only".into(),
+            "Diffusion supports checkpoint-native config and f32/tf32/bf16/experimental fp8_dynamic only".into(),
         ));
     }
     let steps = config::validate(path).map_err(Error::Other)?;
@@ -37,9 +37,12 @@ fn load(
     let variant = match options.model_variant.as_deref() {
         Some("tf32") => "tf32",
         Some("bf16") => "bf16",
+        Some("fp8_dynamic") => "fp8_dynamic",
         _ => "f32",
     };
-    let ctx = if variant == "bf16" {
+    let ctx = if variant == "fp8_dynamic" {
+        apxinf_cuda_next::tensor_ops::Context::with_fp8_conv1d(index)
+    } else if variant == "bf16" {
         apxinf_cuda_next::tensor_ops::Context::with_bf16(index)
     } else if variant == "tf32" {
         apxinf_cuda_next::tensor_ops::Context::with_tf32(index)

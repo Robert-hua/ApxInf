@@ -79,6 +79,15 @@ impl Context {
         ctx.0.bf16.set(true);
         Ok(ctx)
     }
+    /// Experimental E4M3 dynamic Conv1d with BF16 for all other operations.
+    /// Forward 1D convolutions with aligned Cin/Cout >=128 use per-tensor scales.
+    /// Currently qualified only for Thor sm110; this is not an accepted model variant.
+    pub fn with_fp8_conv1d(device: usize) -> Result<Self> {
+        let ctx = Self::new(device)?;
+        check(unsafe { apx_tensor_math_mode(ctx.0.raw, 3) })?;
+        ctx.0.bf16.set(true);
+        Ok(ctx)
+    }
     pub fn with_tf32(device: usize) -> Result<Self> {
         let ctx = Self::new(device)?;
         check(unsafe { apx_tensor_math_mode(ctx.0.raw, 1) })?;

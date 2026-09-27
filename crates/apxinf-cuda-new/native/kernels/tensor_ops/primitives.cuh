@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 // NCHW Conv1d lowering. Reused prepared scratch is [Cin * kernel, Lout].
 __global__ void apx_im2col_1d(int n,int length,int output_length,int kernel,int stride,int pad,const float*x,float*col){
  int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;
@@ -109,7 +110,8 @@ __global__ void apx_batch_norm(int n,int channels,int spatial,const float*x,cons
   float bias=__fsub_rn(p[channels+c],__fmul_rn(p[2*channels+c],scale));
   y[i]=__fadd_rn(__fmul_rn(x[i],scale),bias);return;
  }
- float inv=__fdiv_rn(1.f,sqrtf(p[3*channels+c]+eps));
+ // Match the separately computed FP32 inference invstd (Torch native CUDA).
+ float inv=rsqrtf(__fadd_rn(p[3*channels+c],eps));
  float v=p[c]*(x[i]-p[2*channels+c])*inv+p[channels+c];
  y[i]=bf16?__bfloat162float(__float2bfloat16(v)):v;
 }
@@ -120,4 +122,37 @@ __global__ void apx_rgb_normalize(int pixels,const unsigned char*x,float*y,float
  float mean=c==0?m0:c==1?m1:m2;float std=c==0?s0:c==1?s1:s2;
  float value=__fmul_rn(float(x[p*3+c]),1.f/255.f);
  y[i]=__fdiv_rn(__fsub_rn(value,mean),std);
+}
+
+// Conv1d lowering with padded position rows, fused with the input BF16 cast.
+__global__ void apx_im2row_bf16(int n,int length,int output_length,int kernel,int stride,int pad,int kdim,const float*x,__nv_bfloat16*col){
+ int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;
+ int position=i/kdim,k=i%kernel,c=(i%kdim)/kernel;
+ int source=position*stride-pad+k;
+ col[i]=__float2bfloat16(position<output_length&&source>=0&&source<length?x[c*length+source]:0.f);
+}
+// Preserve two BF16 rounding boundaries: convolution, then optional bias add.
+__global__ void apx_unpack_conv1d_bf16(int n,int length,int padded,const __nv_bfloat16*x,const float*b,float*y){
+ int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;int c=i/length;
+ float v=__bfloat162float(x[c*padded+i%length]);
+ y[i]=b?__bfloat162float(__float2bfloat16(v+__bfloat162float(__float2bfloat16(b[c])))):v;
+}
+
+// Per-tensor dynamic E4M3 quantization. Positive FP32 bits preserve max order.
+__global__ void apx_bf16_absmax(int n,const float*x,float*maximum){
+ int i=blockIdx.x*256+threadIdx.x;float v=0.f;
+ for(;i<n;i+=gridDim.x*256)v=fmaxf(v,fabsf(__bfloat162float(__float2bfloat16(x[i]))));
+ __shared__ float tmp[256];tmp[threadIdx.x]=v;__syncthreads();
+ for(int d=128;d;d>>=1){if(threadIdx.x<d)tmp[threadIdx.x]=fmaxf(tmp[threadIdx.x],tmp[threadIdx.x+d]);__syncthreads();}
+ if(threadIdx.x==0)atomicMax(reinterpret_cast<unsigned int*>(maximum),__float_as_uint(tmp[0]));
+}
+__global__ void apx_fp8_scale(float*scale){if(threadIdx.x==0)scale[0]=fmaxf(scale[0]/448.f,1e-12f);}
+__global__ void apx_to_fp8(int n,const float*x,const float*scale,__nv_fp8_e4m3*y){
+ int i=blockIdx.x*256+threadIdx.x;if(i<n)y[i]=__nv_fp8_e4m3(__bfloat162float(__float2bfloat16(x[i]))/scale[0]);
+}
+__global__ void apx_im2row_fp8(int n,int length,int output_length,int kernel,int stride,int pad,int kdim,const float*x,const float*scale,__nv_fp8_e4m3*col){
+ int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;
+ int position=i/kdim,k=i%kernel,c=(i%kdim)/kernel,source=position*stride-pad+k;
+ float v=position<output_length&&source>=0&&source<length?__bfloat162float(__float2bfloat16(x[c*length+source])):0.f;
+ col[i]=__nv_fp8_e4m3(v/scale[0]);
 }

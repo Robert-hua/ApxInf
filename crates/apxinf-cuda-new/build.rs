@@ -479,7 +479,7 @@ fn build_tensor_ops() {
     run(Command::new("ar").arg("rcs").arg(out.join("libapxinf_tensor_ops.a")).arg(object), "archive tensor operators");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-search=native={cuda}/lib64");
-    for lib in ["static=apxinf_tensor_ops", "cudnn", "cublas", "cudart", "stdc++"] {
+    for lib in ["static=apxinf_tensor_ops", "cudnn", "cublas", "cublasLt", "cudart", "stdc++"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 }

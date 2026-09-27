@@ -140,3 +140,28 @@ operation and reused across requests/graph replays. Other shapes, transposed
 convolution, BF16/TF32, and oversized scratch use the existing cuDNN path.
 Selection is fixed at preparation; it is not a new semantic or persistent recipe.
 The unset default remains cuDNN; performance and numerical evidence are separate.
+
+
+Prepared BF16 convolution candidates (experimental):
+
+- `APXINF_TENSOR_BF16_LAYOUT=reference` selects NCHW storage for RGB stems
+  (`Cin=3`) and 1x1 filters. Other BF16 convolutions retain prepared NHWC
+  weights. This is a prepare-time layout/algorithm choice, not a model semantic.
+- `APXINF_TENSOR_BF16_CONV1D=im2row` lowers forward H=Kh=1 Conv1d to
+  BF16 GEMM, padding output position rows to 16. Input conversion is fused
+  with lowering; weights are prepared once. Activation/output scratch is
+  bounded to 64 MiB, with cuDNN for other profiles or NCHW-selected operations.
+  BF16 convolution output is rounded before adding the BF16-rounded bias.
+- `Context::with_fp8_conv1d` is an explicit mixed-precision context, currently
+  restricted to sm110. It quantizes forward H=Kh=1 Conv1d with Cin/Cout >=128
+  and divisible by 16; all other ops retain BF16-context semantics. BF16-rounded
+  input and weights use per-tensor E4M3 scales `max(abs(x))/448` (floor 1e-12).
+  Weight scale/packing is fixed at prepare, activation scale is updated on GPU
+  each run (per batch item); FP32 accumulation writes BF16 before the bias add.
+  The native cuBLASLt algorithm, descriptors, scale pointers and <=4 MiB GEMM
+  workspace are prepared before capture. Oversized lowering scratch or no
+  native candidate returns an error. No external engine or host tensor math.
+
+These paths have separate operator/Graph tests; they remain outside the unified
+GEMM/Attention recipe registry. FP8 public-model quality is **failed**, not
+implied by operator correctness or speed. See ApexForge v20 evidence.
