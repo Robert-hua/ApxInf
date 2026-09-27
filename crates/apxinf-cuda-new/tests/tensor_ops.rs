@@ -226,3 +226,28 @@ fn fp8_conv1d_quantized_definition_and_dynamic_replay() {
     close(&y.read().unwrap(),&expected_for(0.5),0.);
     x.write(&vec![0.;xv.len()]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.25;batch*cout*olen],0.);
 }
+
+#[test]
+fn bf16_linear_fused_bias_and_graph_match_independent_definition() {
+    // Odd K exercises the DP condition projection; multiple rows exercise ACT.
+    for (rows, width, outputs) in [(1,225,1024),(4,128,32),(1,2,1)] {
+        let ctx=Context::with_bf16(0).unwrap();
+        let round=|v:f32|half::bf16::from_f32(v).to_f32();
+        let xv=(0..rows*width).map(|i|((i*13%37)as f32-18.)/64.).collect::<Vec<_>>();
+        let wv=(0..outputs*width).map(|i|((i*7%29)as f32-14.)/128.).collect::<Vec<_>>();
+        let bv=(0..outputs).map(|i|((i%17)as f32-8.)/512.).collect::<Vec<_>>();
+        let x=ctx.zeros(&[rows,width]).unwrap();x.write(&xv).unwrap();
+        let w=ctx.tensor(&[outputs,width],&wv).unwrap();let bias=ctx.tensor(&[outputs],&bv).unwrap();
+        let(y,op)=ctx.linear(&x,&w,Some(&bias)).unwrap();
+        let mut expected=vec![0.;rows*outputs];
+        for m in 0..rows {for n in 0..outputs {
+            let mut sum=round(bv[n])as f64;
+            for k in 0..width {sum+=round(xv[m*width+k])as f64*round(wv[n*width+k])as f64;}
+            expected[m*outputs+n]=round(sum as f32);
+        }}
+        op.run().unwrap();close(&y.read().unwrap(),&expected,0.);
+        let graph=ctx.capture(&[op]).unwrap();x.write(&vec![0.;xv.len()]).unwrap();
+        drop(w);drop(bias);drop(ctx);graph.replay().unwrap();
+        close(&y.read().unwrap(),&(0..rows*outputs).map(|i|round(bv[i%outputs])).collect::<Vec<_>>(),0.);
+    }
+}

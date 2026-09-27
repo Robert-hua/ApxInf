@@ -117,6 +117,16 @@ That guard checks PI0.5 only; a new family must enforce its own declared boundar
 | GR00T / `VlaRuntime` | Existing `vla_runtime.rs`, `executor.rs`, precision runtime/executor files and private `backbone/`; not migrated to PI0.5's explicit preparation contract |
 | Llama, Qwen3-VL / `LlmTrait` | Existing `general.rs` and family-specific state/decode graph paths; shared autoregressive generation remains in `LlmTrait`, not the VLA runner |
 
+For the fixed Thor DDPM10 profile, ApexForge v21 validates `bf16` with
+`APXINF_TENSOR_BF16_LAYOUT=reference_unet` and no BF16 im2row override.
+The tensor provider prepares BF16 Linear cuBLASLt bias epilogues with a 1 MiB
+algorithm workspace budget; the layout profile additionally selects NCHW for
+narrow-input and small-output contraction Conv1d. Provider resources remain
+owned by prepared operations and captured graphs. This is a profile-qualified
+numerical result, not a universal dtype guarantee or release/deployment approval.
+Other layouts, DDPM100 BF16 and experimental FP8 retain separate acceptance.
+See the parent ApexForge `reports/thor/resnet-unet-parity-v21.md` for evidence.
+
 New VLA code should use `Model` for forward computation and `ModelRunner` for
 execution ownership. Existing family symbols remain their actual names until
 separately migrated; do not rename or import them as part of an unrelated port.
