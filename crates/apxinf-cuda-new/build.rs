@@ -123,6 +123,12 @@ fn run(command: &mut Command, action: &str) {
 }
 
 fn main() {
+    if env::var_os("CARGO_FEATURE_TENSOR_OPS").is_some() {
+        build_tensor_ops();
+    }
+    if env::var_os("CARGO_FEATURE_GEMM_ATTENTION").is_none() {
+        return;
+    }
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -456,4 +462,24 @@ fn main() {
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=stdc++");
+}
+
+fn build_tensor_ops() {
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
+    let cuda = env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".into());
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let arch = env::var("APXINF_CUDA_ARCH").expect("set APXINF_CUDA_ARCH for tensor-ops");
+    let source = "native/adapters/tensor_ops/execution.cu";
+    println!("cargo:rerun-if-changed={source}");
+    println!("cargo:rerun-if-changed=native/include/apxinf_cuda/tensor_ops.h");
+    println!("cargo:rerun-if-changed=native/kernels/tensor_ops/primitives.cuh");
+    let object = out.join("tensor_ops.o");
+    run(Command::new(format!("{cuda}/bin/nvcc")).args(["-c", source, "-O3", "-std=c++17", "-Xcompiler", "-fPIC", "-I", "native/include", "-arch"]).arg(arch).arg("-o").arg(&object), "compile tensor operators");
+    run(Command::new("ar").arg("rcs").arg(out.join("libapxinf_tensor_ops.a")).arg(object), "archive tensor operators");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-search=native={cuda}/lib64");
+    for lib in ["static=apxinf_tensor_ops", "cudnn", "cublas", "cudart", "stdc++"] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 }

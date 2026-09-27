@@ -1,3 +1,4 @@
+#![cfg(feature = "gemm-attention")]
 #[path = "../build_support/gemm_fingerprint.rs"]
 mod gemm_fingerprint;
 

@@ -172,6 +172,23 @@ fn load_impl(
     path: &Path,
     upcast_bf16: bool,
 ) -> Result<(HashMap<String, Tensor>, HashMap<String, String>), String> {
+    load_selected_impl(path, upcast_bf16, &|_| true)
+}
+
+/// Load selected inference tensors. The family must explicitly audit excluded
+/// training-only entries; unsupported dtypes in included entries still fail.
+pub fn load_native_selected(
+    path: &Path,
+    include: &dyn Fn(&str) -> bool,
+) -> Result<(HashMap<String, Tensor>, HashMap<String, String>), String> {
+    load_selected_impl(path, false, include)
+}
+
+fn load_selected_impl(
+    path: &Path,
+    upcast_bf16: bool,
+    include: &dyn Fn(&str) -> bool,
+) -> Result<(HashMap<String, Tensor>, HashMap<String, String>), String> {
     let file = File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file).map_err(|e| format!("mmap failed: {e}"))? };
 
@@ -216,6 +233,8 @@ fn load_impl(
         if name == "__metadata__" {
             continue;
         }
+
+        if !include(name) { continue; }
 
         let info: TensorInfo = serde_json::from_value(value.clone())
             .map_err(|e| format!("failed to parse tensor '{name}': {e}"))?;
@@ -326,6 +345,7 @@ mod tests {
                 DType::F16 => "F16",
                 DType::BF16 => "BF16",
                 DType::F8E4M3 => "F8_E4M3",
+                other => panic!("test fixture dtype not supported: {other}"),
             };
             let shape_json: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
             let end = data_offset + data.len();

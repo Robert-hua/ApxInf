@@ -256,11 +256,54 @@ pub struct VlaContract {
     pub accepts_rgb_u8: bool,
 }
 
+/// Fixed vision/state profile for policies without a language input. Kept
+/// separate from the existing patch/token seam so old families remain strict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TensorProfile {
+    pub image_shape: Vec<usize>,
+    pub state_shape: Vec<usize>,
+    pub action_shape: [usize; 2],
+    /// Includes the initial draw followed by every scheduler draw, if needed.
+    pub noise_shape: Option<Vec<usize>>,
+}
+
+/// Borrowed contiguous host F32 view. The request cannot outlive its owner;
+/// the synchronous runner copies inputs before returning. No host tensor copies.
+#[derive(Clone, Copy)]
+pub struct HostTensor<'a> {
+    pub shape: &'a [usize],
+    pub values: &'a [f32],
+}
+#[derive(Clone, Copy)]
+pub enum ImageTensor<'a> {
+    Normalized(HostTensor<'a>),
+    RgbU8 { shape:&'a[usize], values:&'a[u8], mean:[f32;3], std:[f32;3] },
+}
+pub struct TensorRequest<'a> {
+    pub image: ImageTensor<'a>,
+    pub state: HostTensor<'a>,
+    pub noise: Option<HostTensor<'a>>,
+}
+
 /// Unified VLA runtime interface.
 ///
 /// The boxed return keeps this trait object-safe so `LoadedModel::Vla` can
 /// directly hold heterogeneous model runtimes.
 pub trait VlaRuntime {
+    fn tensor_profile(&self) -> Option<TensorProfile> { None }
+
+    fn tensor_diagnostics(&self) -> Result<BTreeMap<String, (Vec<usize>, Vec<f32>)>> {
+        Err(Error::Other("tensor diagnostics not supported".into()))
+    }
+
+    fn infer_tensors_host_f32(&self, _request: &TensorRequest<'_>) -> Result<Vec<f32>> {
+        Err(Error::Other("this model does not accept a vision/state tensor request".into()))
+    }
+
+    fn prepare_tensors(&self, _policy: ExecutionPolicy) -> Result<PreparationStatus> {
+        Err(Error::Other("tensor preparation is not supported".into()))
+    }
+
     /// Resolved model-local implementation ID, when supported by the family.
     fn model_variant(&self) -> Option<&'static str> {
         None

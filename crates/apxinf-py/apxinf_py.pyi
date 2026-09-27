@@ -26,7 +26,7 @@ class SentencePieceTokenizer:
     def from_file(path: str) -> "SentencePieceTokenizer": ...
     def encode(self, text: str, add_bos: bool = ...) -> list[int]: ...
 
-class Model:
+class ModelRunner:
     """A loaded VLA model handle exposing its bare-model inference contract."""
 
     @staticmethod
@@ -45,7 +45,7 @@ class Model:
         flow_start_time: float | None = ...,
         sampling_seed: int = ...,
         assets: dict[str, str] | None = ...,
-    ) -> "Model":
+    ) -> "ModelRunner":
         """Load a checkpoint through the unified ``AutoModel`` frontend.
 
         ``device`` is ``cuda:N`` (default) or ``cpu``.
@@ -61,6 +61,17 @@ class Model:
         ``sampling_seed`` seeds the implicit device-side noise stream.
         """
         ...
+
+    def infer_pixels(
+        self, image: npt.NDArray[np.uint8], state: npt.NDArray[np.float32],
+        mean: list[float], std: list[float], noise: npt.NDArray[np.float32] | None = None,
+    ) -> npt.NDArray[np.float32]: ...
+    def infer_tensors(
+        self, image: npt.NDArray[np.float32], state: npt.NDArray[np.float32],
+        noise: npt.NDArray[np.float32] | None = None,
+    ) -> npt.NDArray[np.float32]: ...
+    def prepare_tensors(self, mode: str = "graph") -> str: ...
+    def tensor_diagnostics(self) -> dict[str, tuple[list[int], list[float]]]: ...
 
     def _infer_preprocessed(
         self,

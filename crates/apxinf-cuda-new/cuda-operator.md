@@ -116,3 +116,18 @@ Attention computes `softmax(mask(scale * (Q @ K^T))) @ V`. Q/K/V have the same d
 The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs` and an independent-reference all-candidate numerical test to `src/ops/tests/precision/precision.rs`.
 
 Tests must run through `crates/apxinf-cuda-new/test-new.sh`; a normal `cargo test` from the repository root does not automatically test this crate.
+
+## Prepared tensor operations (experimental `tensor-ops` feature)
+
+`tensor_ops::Context` exposes fixed contiguous tensors and prepared operations for
+ResNet/Transformer/U-Net composition. It has separate storage and lifetime tests;
+these operations are not yet integrated with the GEMM/Attention persistent recipe
+registry or its semantic metadata tests. Do not infer that framework integration
+from a successful product build.
+
+`batch_norm(x, parameters, eps)` requires NCHW input and FP32 `[4,C]` parameters
+ordered weight, bias, mean, variance. It computes eval BatchNorm with input-centered
+scaling; BF16 context rounds its output. `frozen_batch_norm` uses separate FP32
+reciprocal-square-root, scale, bias, multiplication and addition steps, and retains
+FP32 output even in a BF16 context. Both require finite positive epsilon, matching
+context and shape, retain their buffers, and support prepared graph replay.

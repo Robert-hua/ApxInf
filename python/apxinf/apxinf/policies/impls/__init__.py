@@ -19,10 +19,12 @@ inside ``from_pretrained``, so importing the package stays offline-friendly.
 
 from __future__ import annotations
 
+from .act import ACTPolicy
+from .diffusion import DiffusionPolicy
 from .gr00t import Gr00tPolicy
 from .pi05 import Pi05Policy
 from .pi0fast import Pi0FastPolicy
 from .qwen_drive import QwenDrivePolicy
 from .walloss import WallossPolicy
 
-__all__ = ["Pi05Policy", "Pi0FastPolicy", "Gr00tPolicy", "QwenDrivePolicy", "WallossPolicy"]
+__all__ = ["DiffusionPolicy", "ACTPolicy", "Pi05Policy", "Pi0FastPolicy", "Gr00tPolicy", "QwenDrivePolicy", "WallossPolicy"]

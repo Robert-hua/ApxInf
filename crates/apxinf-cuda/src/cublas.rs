@@ -129,6 +129,7 @@ impl CublasHandle {
                 }
             }
             DType::F8E4M3 => Err("use kernels::gemm::fp8 for FP8 operands".into()),
+            DType::I8 | DType::I32 => Err("integer operands require an explicit quantized GEMM implementation".into()),
         }
     }
 
@@ -223,6 +224,7 @@ impl CublasHandle {
                 }
             }
             DType::F8E4M3 => Err("use kernels::gemm::fp8 for FP8 operands".into()),
+            DType::I8 | DType::I32 => Err("integer operands require an explicit quantized GEMM implementation".into()),
         }
     }
 
@@ -329,6 +331,7 @@ impl CublasHandle {
                 }
             }
             DType::F8E4M3 => Err("use kernels::gemm::fp8 for FP8 operands".into()),
+            DType::I8 | DType::I32 => Err("integer operands require an explicit quantized GEMM implementation".into()),
         }
     }
 

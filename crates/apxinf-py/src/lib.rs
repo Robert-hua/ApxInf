@@ -445,6 +445,62 @@ impl ModelRunner {
 #[pymethods]
 impl ModelRunner {
     /// Load a VLA checkpoint through the unified `AutoModel` frontend.
+    #[pyo3(signature = (image, state, noise=None))]
+    fn infer_tensors<'py>(&self, py: Python<'py>, image: PyReadonlyArrayDyn<'py, f32>, state: PyReadonlyArrayDyn<'py, f32>, noise: Option<PyReadonlyArrayDyn<'py, f32>>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let runtime = self.model.vla().map_err(runtime_err)?;
+        let profile = runtime.tensor_profile().ok_or_else(|| PyValueError::new_err("model has no vision/state tensor profile"))?;
+        // Borrow NumPy storage for this synchronous call. The model runner
+        // validates finiteness and uploads once; do not allocate CPU Tensor/Vec copies.
+        fn view<'a>(array: &'a PyReadonlyArrayDyn<'_, f32>, shape: &[usize]) -> PyResult<apxinf_model::vla::HostTensor<'a>> {
+            if array.shape() != shape { return Err(PyValueError::new_err(format!("expected {shape:?}, got {:?}", array.shape()))); }
+            let values = array.as_slice().map_err(|_| PyValueError::new_err("expected C-contiguous float32"))?;
+            Ok(apxinf_model::vla::HostTensor { shape: array.shape(), values })
+        }
+        let image = view(&image, &profile.image_shape)?;
+        let state = view(&state, &profile.state_shape)?;
+        let noise_view = match (noise.as_ref(), profile.noise_shape.as_ref()) {
+            (None, None) => None,
+            (Some(array), Some(shape)) => Some(view(array, shape)?),
+            _ => return Err(PyValueError::new_err("noise does not match this model's tensor profile")),
+        };
+        let request = apxinf_model::vla::TensorRequest { image:apxinf_model::vla::ImageTensor::Normalized(image), state, noise: noise_view };
+        let flat = runtime.infer_tensors_host_f32(&request).map_err(runtime_err)?;
+        self.action_array(py, flat)
+    }
+
+    /// HWC RGB upload and GPU normalization followed by the same prepared model.
+    #[pyo3(signature = (image,state,mean,std,noise=None))]
+    fn infer_pixels<'py>(&self,py:Python<'py>,image:PyReadonlyArrayDyn<'py,u8>,state:PyReadonlyArrayDyn<'py,f32>,mean:[f32;3],std:[f32;3],noise:Option<PyReadonlyArrayDyn<'py,f32>>)->PyResult<Bound<'py,PyArray2<f32>>>{
+        let runtime=self.model.vla().map_err(runtime_err)?;
+        let profile=runtime.tensor_profile().ok_or_else(||PyValueError::new_err("model has no vision/state profile"))?;
+        if state.shape()!=profile.state_shape {return Err(PyValueError::new_err("state shape mismatch"))}
+        let state_view=apxinf_model::vla::HostTensor{shape:state.shape(),values:state.as_slice().map_err(|_|PyValueError::new_err("state must be contiguous"))?};
+        let noise_view=match(noise.as_ref(),profile.noise_shape.as_ref()){
+            (None,None)=>None,
+            (Some(n),Some(shape)) if n.shape()==shape=>Some(apxinf_model::vla::HostTensor{shape:n.shape(),values:n.as_slice().map_err(|_|PyValueError::new_err("noise must be contiguous"))?}),
+            _=>return Err(PyValueError::new_err("noise profile mismatch")),
+        };
+        let image_view=apxinf_model::vla::ImageTensor::RgbU8{shape:image.shape(),values:image.as_slice().map_err(|_|PyValueError::new_err("image must be contiguous"))?,mean,std};
+        let request=apxinf_model::vla::TensorRequest{image:image_view,state:state_view,noise:noise_view};
+        self.action_array(py,runtime.infer_tensors_host_f32(&request).map_err(runtime_err)?)
+    }
+
+    #[pyo3(signature = (mode="graph"))]
+    fn prepare_tensors(&self, mode: &str) -> PyResult<String> {
+        let policy = match mode {
+            "eager" => apxinf_model::ExecutionPolicy::Eager,
+            "graph" => apxinf_model::ExecutionPolicy::RequireGraph,
+            _ => return Err(PyValueError::new_err("mode must be eager or graph")),
+        };
+        let status = self.model.vla().map_err(runtime_err)?.prepare_tensors(policy).map_err(runtime_err)?;
+        Ok(format!("{status:?}"))
+    }
+
+    fn tensor_diagnostics(&self) -> PyResult<BTreeMap<String, (Vec<usize>, Vec<f32>)>> {
+        self.model.vla().map_err(runtime_err)?.tensor_diagnostics().map_err(runtime_err)
+    }
+
+    /// Load a VLA checkpoint through the unified `AutoModel` frontend.
     ///
     /// * `model` — model name, e.g. `"pi05"`.
     /// * `path` — checkpoint directory or index file.

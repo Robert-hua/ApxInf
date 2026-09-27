@@ -1,6 +1,10 @@
 //! LLM model architectures and abstractions.
 
 mod accelerator;
+#[cfg(feature = "cuda")]
+pub mod act;
+#[cfg(feature = "cuda")]
+pub mod diffusion;
 pub mod auto;
 pub mod builtin;
 pub mod debug;

@@ -264,6 +264,7 @@ impl AutoModel {
             .map_err(|error| Error::Other(format!("parse {}: {error}", config_path.display())))?;
         let model_type = config
             .get("model_type")
+            .or_else(|| config.get("type").filter(|v| matches!(v.as_str(),Some("act"|"diffusion"))))
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
                 Error::Other(format!(
@@ -297,7 +298,7 @@ impl AutoModel {
         if options.model_variant.is_some()
             && !matches!(
                 model_name,
-                "pi05" | "pi05-cuda" | "qwen_drive" | "qwen_drive-cuda"
+                "pi05" | "pi05-cuda" | "qwen_drive" | "qwen_drive-cuda" | "act" | "act-cuda" | "diffusion" | "diffusion-cuda"
             )
         {
             return Err(Error::Other(format!(

@@ -14,6 +14,10 @@ use crate::registry;
 /// Register every implementation shipped in this crate. Re-registering is
 /// harmless and keeps `AutoModel::load_model` self-contained for users.
 pub fn register_builtin_models() {
+    #[cfg(feature = "cuda")]
+    crate::act::register_builtin();
+    #[cfg(feature = "cuda")]
+    crate::diffusion::register_builtin();
     registry::register("llama", load_llama);
     registry::register("qwen3_vl", load_qwen3vl);
     registry::register("qwen3vl", load_qwen3vl);

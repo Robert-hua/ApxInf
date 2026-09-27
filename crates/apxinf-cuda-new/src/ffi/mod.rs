@@ -9,4 +9,5 @@ pub(crate) mod raw;
 
 pub(crate) use raw::*;
 
+#[cfg(feature = "gemm-attention")]
 pub(crate) mod abi;

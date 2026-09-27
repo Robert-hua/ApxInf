@@ -1,3 +1,4 @@
+#![cfg(feature = "gemm-attention")]
 //! Public-API integration tests from an external executor's point of view.
 //!
 //! Adding an L3 operator normally does not require editing this file. Extend it
@@ -5,7 +6,7 @@
 //! stream, or lifetime contract exposed to downstream crates.
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{
+use apxinf_cuda_next::{
     capture,
     ops::{gemm, prepare_with_session, with_session, ExecutionSession, GemmArgs},
     CudaBuffer, CudaContext,
