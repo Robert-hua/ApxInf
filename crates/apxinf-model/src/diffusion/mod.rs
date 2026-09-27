@@ -30,7 +30,7 @@ fn load(
             "Diffusion supports checkpoint-native config and f32/tf32/bf16 only".into(),
         ));
     }
-    config::validate(path).map_err(Error::Other)?;
+    let steps = config::validate(path).map_err(Error::Other)?;
     let Device::Cuda(index) = device else {
         return Err(Error::Other("Diffusion requires CUDA".into()));
     };
@@ -48,7 +48,7 @@ fn load(
     }
     .map_err(Error::Other)?;
     let mut w = weights::Weights::load(path, &ctx).map_err(Error::Other)?;
-    let model = model::Model::build(ctx, &mut w).map_err(Error::Other)?;
+    let model = model::Model::build(ctx, &mut w, steps).map_err(Error::Other)?;
     Ok(LoadedModel::Vla(Box::new(model_runner::ModelRunner::new(
         model, variant, options.autotune,
     )?)))

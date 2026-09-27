@@ -137,3 +137,32 @@ fn group_norm_large_rows_match_independent_f64_statistics() {
     close(&output.read().unwrap(),&expected,3e-6);
     let graph=ctx.capture(&[op]).unwrap();graph.replay().unwrap();close(&output.read().unwrap(),&expected,3e-6);
 }
+
+#[test]
+fn conv1d_real_shape_stride_bias_and_graph_match_f64_reference() {
+    // Run with default cuDNN and APXINF_TENSOR_FP32_CONV1D=im2col independently.
+    for (batch,cin,cout,length,stride) in [(2,7,11,13,2),(1,256,256,56,1)] {
+        let ctx=Context::new(0).unwrap();let kernel=5;let pad=2;
+        let out_length=(length+2*pad-kernel)/stride+1;
+        let xv=(0..batch*cin*length).map(|i|((i*17%113) as f32-56.)*0.003).collect::<Vec<_>>();
+        let wv=(0..cout*cin*kernel).map(|i|((i*13%97) as f32-48.)*0.002).collect::<Vec<_>>();
+        let bv=(0..cout).map(|i|i as f32*0.0001).collect::<Vec<_>>();
+        let x=ctx.zeros(&[batch,cin,1,length]).unwrap();x.write(&xv).unwrap();
+        let w=ctx.tensor(&[cout,cin,1,kernel],&wv).unwrap();let bias=ctx.tensor(&[cout],&bv).unwrap();
+        let (y,op)=ctx.conv2d(&x,&w,Some(&bias),[1,stride],[0,pad],false).unwrap();
+        let mut expected=vec![0.;batch*cout*out_length];
+        for n in 0..batch {for co in 0..cout {for t in 0..out_length {
+            let mut sum=bv[co] as f64;
+            for ci in 0..cin {for k in 0..kernel {
+                let pos=(t*stride+k) as isize-pad as isize;
+                if pos>=0 && pos<length as isize {sum+=xv[(n*cin+ci)*length+pos as usize] as f64*wv[(co*cin+ci)*kernel+k] as f64;}
+            }}
+            expected[(n*cout+co)*out_length+t]=sum as f32;
+        }}}
+        op.run().unwrap();close(&y.read().unwrap(),&expected,2e-5);
+        let graph=ctx.capture(&[op]).unwrap();
+        x.write(&vec![0.;xv.len()]).unwrap();graph.replay().unwrap();
+        close(&y.read().unwrap(),&(0..expected.len()).map(|i|bv[(i/out_length)%cout]).collect::<Vec<_>>(),1e-6);
+        x.write(&xv).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&expected,2e-5);
+    }
+}

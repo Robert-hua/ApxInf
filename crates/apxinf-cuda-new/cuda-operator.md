@@ -131,3 +131,12 @@ scaling; BF16 context rounds its output. `frozen_batch_norm` uses separate FP32
 reciprocal-square-root, scale, bias, multiplication and addition steps, and retains
 FP32 output even in a BF16 context. Both require finite positive epsilon, matching
 context and shape, retain their buffers, and support prepared graph replay.
+
+For prepared tensor convolutions, the experimental process setting
+`APXINF_TENSOR_FP32_CONV1D=im2col` selects a preallocated im2col + strict FP32
+SGEMM implementation for forward Conv1d represented as NCHW with H=Kh=1,
+height stride=1 and height padding=0. Scratch is bounded to 64 MiB per prepared
+operation and reused across requests/graph replays. Other shapes, transposed
+convolution, BF16/TF32, and oversized scratch use the existing cuDNN path.
+Selection is fixed at preparation; it is not a new semantic or persistent recipe.
+The unset default remains cuDNN; performance and numerical evidence are separate.

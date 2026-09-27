@@ -22,6 +22,9 @@ class DiffusionPolicy:
 
     def __init__(self, config, adapter, model_runner):
         self.model_runner = model_runner
+        self.denoising_steps = config.get("num_inference_steps", 100)
+        if self.denoising_steps not in (10, 100):
+            raise ValueError("Native Diffusion supports DDPM10 or DDPM100")
         self.image_key = next(k for k, v in config["input_features"].items() if v["type"] == "VISUAL")
         stats = adapter["stats"]["norm_stats"]
         self.q01 = np.asarray(stats["state"]["q01"], dtype=np.float32)
@@ -39,6 +42,7 @@ class DiffusionPolicy:
                          "action_horizon": 8, "prediction_horizon": 56, "action_dim": 2,
                          "image_shape": [360, 640, 3], "state_dim": 33, "image_keys": [self.image_key],
                          "state_key": "observation.state", "action_units": "lxry_control_units"}
+        self.metadata["denoising_steps"] = self.denoising_steps
         self._closed = False
         self.action_min = np.asarray(adapter["stats"]["native_dp_action_min"], dtype=np.float32)
         self.action_range = np.maximum(np.asarray(adapter["stats"]["native_dp_action_max"], dtype=np.float32) - self.action_min, np.float32(1e-8))
@@ -61,12 +65,12 @@ class DiffusionPolicy:
         image = np.ascontiguousarray(image)
         state = np.ascontiguousarray((2 * (state - self.q01) / self.state_range - 1)[None])
         if noise is None:
-            noise = self._rng.standard_normal((101, 56, 2), dtype=np.float32)
+            noise = self._rng.standard_normal((self.denoising_steps + 1, 56, 2), dtype=np.float32)
             noise[-1] = 0
         else:
             noise = np.ascontiguousarray(noise, dtype=np.float32)
-        if noise.shape != (101, 56, 2) or not np.isfinite(noise).all():
-            raise ValueError("Diffusion noise must be finite [101,56,2]")
+        if noise.shape != (self.denoising_steps + 1, 56, 2) or not np.isfinite(noise).all():
+            raise ValueError(f"Diffusion noise must be finite [{self.denoising_steps + 1},56,2]")
         begin_model = time.perf_counter()
         normalized = self.model_runner.infer_pixels(image, state, self.mean[:, 0, 0].tolist(), self.std[:, 0, 0].tolist(), noise)
         model_ms = (time.perf_counter() - begin_model) * 1000

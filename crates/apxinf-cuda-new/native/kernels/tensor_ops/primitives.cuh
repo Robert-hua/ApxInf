@@ -2,6 +2,13 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cuda_bf16.h>
+// NCHW Conv1d lowering. Reused prepared scratch is [Cin * kernel, Lout].
+__global__ void apx_im2col_1d(int n,int length,int output_length,int kernel,int stride,int pad,const float*x,float*col){
+ int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;
+ int position=i%output_length,k=(i/output_length)%kernel,c=i/(output_length*kernel);
+ int source=position*stride-pad+k;
+ col[i]=source>=0&&source<length?x[c*length+source]:0.f;
+}
 __global__ void apx_to_bf16(int n,const float*x,__nv_bfloat16*y){int i=blockIdx.x*256+threadIdx.x;if(i<n)y[i]=__float2bfloat16(x[i]);}
 __global__ void apx_from_bf16(int n,const __nv_bfloat16*x,float*y){int i=blockIdx.x*256+threadIdx.x;if(i<n)y[i]=__bfloat162float(x[i]);}
 __global__ void apx_round_bf16(int n,float*y,const float*b,int inner,int channels){int i=blockIdx.x*256+threadIdx.x;if(i<n){float v=y[i];if(b)v+=__bfloat162float(__float2bfloat16(b[(i/inner)%channels]));y[i]=__bfloat162float(__float2bfloat16(v));}}

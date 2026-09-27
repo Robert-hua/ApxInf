@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 #include <stdexcept>
+#include <cstdlib>
+#include <cstring>
 namespace {
 thread_local std::string error;
 void ck(cudaError_t s){if(s!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(s));}
@@ -16,6 +18,7 @@ struct Context{cudaStream_t stream{};cudnnHandle_t dn{};cublasHandle_t bl{};bool
 struct Execution{Context*ctx{};apx_tensor_spec s{};const float*a{};const float*b{};const float*c{};float*y{};
  cudnnTensorDescriptor_t xdesc{},ydesc{};cudnnFilterDescriptor_t wdesc{};cudnnConvolutionDescriptor_t conv{};
  void*workspace{};size_t workspace_bytes{};
+ bool im2col_1d=false;
  __nv_bfloat16*abf{};__nv_bfloat16*bbf{};__nv_bfloat16*ybf{};int an{},bn{},yn{};
  cudnnConvolutionFwdAlgo_t forward_algo=CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
  cudnnConvolutionBwdDataAlgo_t backward_algo=CUDNN_CONVOLUTION_BWD_DATA_ALGO_0;
@@ -31,6 +34,16 @@ void enqueue(Execution&e){auto&p=e.s.p;auto&f=e.s.f;auto st=e.ctx->stream;float 
   ck(cublasSgemm(e.ctx->bl,CUBLAS_OP_T,CUBLAS_OP_N,p[1],p[0],p[2],&one,e.b,p[2],e.a,p[2],&zero,e.y,p[1]));
   if(e.c)apx_elementwise<<<(p[0]*p[1]+255)/256,256,0,st>>>(p[0]*p[1],e.y,e.c,nullptr,e.y,6,1,p[1],0,0);break;
  case 1: case 2:
+  if(e.im2col_1d){
+   int k=p[1]*p[6],columns=p[9],elements=k*columns;
+   for(int batch=0;batch<p[0];batch++){
+    auto*col=static_cast<float*>(e.workspace);
+    apx_im2col_1d<<<(elements+255)/256,256,0,st>>>(elements,p[3],columns,p[6],p[13],p[11],e.a+batch*p[1]*p[3],col);
+    ck(cublasSgemm(e.ctx->bl,CUBLAS_OP_N,CUBLAS_OP_N,columns,p[4],k,&one,col,columns,e.b,k,&zero,e.y+batch*p[4]*columns,columns));
+   }
+   if(e.c)apx_elementwise<<<(p[0]*p[4]*p[9]+255)/256,256,0,st>>>(p[0]*p[4]*p[9],e.y,e.c,nullptr,e.y,6,p[9],p[4],0,0);
+   break;
+  }
   if(e.s.kind==1)ck(cudnnConvolutionForward(e.ctx->dn,&one,e.xdesc,e.abf?static_cast<void*>(e.abf):const_cast<float*>(e.a),e.wdesc,e.bbf?static_cast<void*>(e.bbf):const_cast<float*>(e.b),e.conv,e.forward_algo,e.workspace,e.workspace_bytes,&zero,e.ydesc,e.ybf?static_cast<void*>(e.ybf):e.y));
   else ck(cudnnConvolutionBackwardData(e.ctx->dn,&one,e.wdesc,e.bbf?static_cast<void*>(e.bbf):const_cast<float*>(e.b),e.xdesc,e.abf?static_cast<void*>(e.abf):const_cast<float*>(e.a),e.conv,e.backward_algo,e.workspace,e.workspace_bytes,&zero,e.ydesc,e.ybf?static_cast<void*>(e.ybf):e.y));
   if(e.ybf){apx_unpack_nhwc<<<(e.yn+255)/256,256,0,st>>>(e.yn,p[4],p[8]*p[9],e.ybf,e.y);if(e.c)apx_round_bf16<<<(e.yn+255)/256,256,0,st>>>(e.yn,e.y,e.c,p[8]*p[9],p[4]);break;}
@@ -61,6 +74,16 @@ extern "C" int apx_tensor_math_mode(void*c,int mode){return guard([&]{if(mode<0|
 extern "C" int apx_tensor_sync(void*c){return guard([&]{ck(cudaStreamSynchronize(static_cast<Context*>(c)->stream));});}
 extern "C" int apx_tensor_prepare(void*c,const apx_tensor_spec*s,const float*a,const float*b,const float*bias,float*y,void**out){*out=nullptr;return guard([&]{
  auto e=std::make_unique<Execution>();e->ctx=static_cast<Context*>(c);e->s=*s;e->a=a;e->b=b;e->c=bias;e->y=y;auto&p=e->s.p;
+ // Experimental provider choice is frozen during prepare; enqueue does not read env,
+ // allocate, or select algorithms. Other shapes/precisions retain the cuDNN path.
+ const char*conv1d=std::getenv("APXINF_TENSOR_FP32_CONV1D");
+ if(conv1d&&std::strcmp(conv1d,"im2col")==0&&s->kind==1&&!e->ctx->bf16&&!e->ctx->tf32&&p[2]==1&&p[5]==1&&p[8]==1&&p[10]==0&&p[12]==1){
+  size_t elements=size_t(p[1])*p[6]*p[9];
+  if(elements<=size_t(64*1024*1024)/sizeof(float)){
+   e->im2col_1d=true;e->workspace_bytes=elements*sizeof(float);ck(cudaMalloc(&e->workspace,e->workspace_bytes));
+   *out=e.release();return;
+  }
+ }
  if(e->ctx->bf16&&(s->kind==0||s->kind==1||s->kind==2||s->kind==10)){
   if(s->kind==0){e->an=p[0]*p[2];e->bn=p[1]*p[2];e->yn=p[0]*p[1];}
   else if(s->kind==10){e->an=p[0]*p[1]*p[3];e->bn=p[0]*p[2]*p[3];e->yn=p[0]*p[1]*p[2];}
@@ -106,7 +129,7 @@ extern "C" void apx_tensor_graph_destroy(void*g){if(g)cudaGraphExecDestroy(stati
 // Explicit offline preparation using the most recent real activation buffers.
 // This is never called by enqueue or inside graph capture.
 extern "C" int apx_tensor_tune(void*raw){return guard([&]{
- auto&e=*static_cast<Execution*>(raw);if(e.s.kind!=1)return;
+ auto&e=*static_cast<Execution*>(raw);if(e.s.kind!=1||e.im2col_1d)return;
  auto&p=e.s.p;ck(cudaStreamSynchronize(e.ctx->stream));
  if(e.abf)apx_pack_nhwc<<<(e.an+255)/256,256,0,e.ctx->stream>>>(e.an,p[1],p[2]*p[3],e.a,e.abf);
  void*scratch=nullptr;constexpr size_t limit=64*1024*1024;ck(cudaMalloc(&scratch,limit));

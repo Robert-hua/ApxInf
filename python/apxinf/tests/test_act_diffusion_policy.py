@@ -62,3 +62,18 @@ def test_diffusion_preserves_exact_noise():
     noise=np.arange(101*56*2,dtype=np.float32).reshape(101,56,2)
     p.infer({IMAGE:np.zeros((360,640,3),np.uint8),'observation.state':np.zeros(33)},noise=noise)
     np.testing.assert_array_equal(r.calls[0][2],noise)
+
+
+def test_diffusion_ddpm10_noise_contract():
+    _,r,adapter,config=make(DiffusionPolicy)
+    config['num_inference_steps']=10
+    policy=DiffusionPolicy(config,adapter,r)
+    obs={IMAGE:np.zeros((360,640,3),np.uint8),'observation.state':np.zeros(33)}
+    noise=np.arange(11*56*2,dtype=np.float32).reshape(11,56,2)
+    policy.infer(obs,noise=noise)
+    np.testing.assert_array_equal(r.calls[-1][2],noise)
+    policy.infer(obs)
+    assert r.calls[-1][2].shape==(11,56,2)
+    np.testing.assert_array_equal(r.calls[-1][2][-1],np.zeros((56,2)))
+    assert policy.metadata['denoising_steps']==10
+    with pytest.raises(ValueError):policy.infer(obs,noise=np.zeros((101,56,2),np.float32))

@@ -146,11 +146,12 @@ impl<'a> Builder<'a> {
     }
 }
 impl Model {
-    pub fn build(ctx: Context, w: &mut Weights) -> Result<Self> {
+    pub fn build(ctx: Context, w: &mut Weights, steps: usize) -> Result<Self> {
+        let timesteps = super::config::timesteps(steps)?;
         let image = ctx.zeros(&[1, 3, 360, 640])?;
         let state = ctx.zeros(&[1, 33])?;
-        // Index zero is x_T, indices 1..100 are step noises; the final draw is unused.
-        let noise = ctx.zeros(&[101, 56, 2])?;
+        // Initial noise + scheduler draws; the final zero entry is unused.
+        let noise = ctx.zeros(&[steps + 1, 56, 2])?;
         let sample = ctx.zeros(&[1, 56, 2])?;
         let mut b = Builder {
             ctx: ctx.clone(),
@@ -255,7 +256,7 @@ impl Model {
             cumulative.push(product as f32);
         }
         let original = ctx.zeros(&[1, 56, 2])?;
-        for (step, t) in (0..100).rev().enumerate() {
+        for (step, &t) in timesteps.iter().enumerate() {
             let mut values = Vec::with_capacity(128);
             for trig in 0..2 {
                 for d in 0..64 {
@@ -270,7 +271,7 @@ impl Model {
             operations.push(ctx.copy_into(&epsilon, &snapshot)?);
             b.diagnostics.push((format!("ddpm.{t}.epsilon"), snapshot));
             let at = cumulative[t];
-            let prev = if t == 0 { 1. } else { cumulative[t - 1] };
+            let prev = timesteps.get(step+1).map_or(1., |&previous| cumulative[previous]);
             let bt = 1. - at;
             let bp = 1. - prev;
             let current_alpha = at / prev;

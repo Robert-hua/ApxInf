@@ -110,7 +110,7 @@ That guard checks PI0.5 only; a new family must enforce its own declared boundar
 
 | Family / contract | Current organization and limits |
 | --- | --- |
-| ACT / Diffusion / tensor `VlaRuntime` seam | Family-local config/weights/model/model_runner; ResNet18, B1/To1, RGB360x640/state33/lxry2 only; `f32` default, experimental `bf16`/`tf32`; explicit tensor eager/whole-model graph. BF16 diffusion numerical acceptance remains failed; see ApexForge reports. |
+| ACT / Diffusion / tensor `VlaRuntime` seam | Family-local config/weights/model/model_runner; ResNet18, B1/To1, RGB360x640/state33/lxry2 only; `f32` default, experimental `bf16`/`tf32`; explicit tensor eager/whole-model graph. DDPM10/100 selected by checkpoint (100 training timesteps); noise [steps+1,56,2]. Historical DDPM100 BF16 diffusion numerical acceptance remains failed; see ApexForge reports. |
 | PI0.5 / `VlaRuntime` | `model/`, `model_runner/`, `weights/`; explicit preparation policy/status, stale-plan checks and retained-resource tests; `model_variant` selects `auto`, `bf16`, `fp8_static`, `int8_dynamic` |
 | Qwen-Drive / `VlaRuntime` | Planning-only `model/`, `model_runner/`, `weights/`; one BF16 Blocks file; direct/reasoning planning; local GDN graphs only, full `prepare` explicitly unsupported. See [family contract](qwen-drive-planning.md). |
 | WallOSS / `VlaRuntime` | Existing `bf16_runtime.rs`, `bf16_executor.rs`, `fp8.rs` and weight files; not migrated to PI0.5's runner/variant or explicit preparation contract |

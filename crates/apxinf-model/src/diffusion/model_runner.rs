@@ -42,13 +42,13 @@ impl VlaRuntime for ModelRunner {
             image_shape: vec![1, 3, 360, 640],
             state_shape: vec![1, 33],
             action_shape: [56, 2],
-            noise_shape: Some(vec![101, 56, 2]),
+            noise_shape: Some(self.model.noise.shape().to_vec()),
         })
     }
     fn infer_tensors_host_f32(&self, r: &TensorRequest<'_>) -> Result<Vec<f32>> {
         let profile = self.tensor_profile().unwrap();
         if r.state.shape != profile.state_shape
-            || r.noise.is_none_or(|n| n.shape != [101, 56, 2])
+            || r.noise.is_none_or(|n| n.shape != self.model.noise.shape())
         {
             return Err(Error::Other("Diffusion tensor profile mismatch".into()));
         }
