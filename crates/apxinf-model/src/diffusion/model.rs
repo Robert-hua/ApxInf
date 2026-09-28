@@ -138,10 +138,13 @@ impl<'a> Builder<'a> {
         )?;
         self.take(self.ctx.activation(&x, Activation::Mish))
     }
-    fn residual(&mut self, x: &Tensor, condition: &Tensor, name: &str) -> Result<Tensor> {
+    fn residual(&mut self, x: &Tensor, condition_mish: &Tensor, name: &str) -> Result<Tensor> {
         let mut y = self.conv_block(x, &format!("{name}.conv1"))?;
-        let cond = self.take(self.ctx.activation(condition, Activation::Mish))?;
-        let cond = self.linear(&cond, &format!("{name}.cond_encoder.1"))?;
+        // The global conditioning tensor is identical for every residual block in
+        // one U-Net invocation.  Its Mish activation is pointwise and has no
+        // reduction, so compute it once in `unet` and reuse the exact tensor
+        // rather than launching the same activation kernel 12 times per step.
+        let cond = self.linear(condition_mish, &format!("{name}.cond_encoder.1"))?;
         let channels = y.shape()[1];
         let scale = cond.view(0, &[channels])?;
         let bias = cond.view(channels, &[channels])?;
@@ -162,25 +165,26 @@ impl<'a> Builder<'a> {
         time = self.cast_activation(&time)?;
         time = self.linear(&time, "diffusion.unet.diffusion_step_encoder.3")?;
         let global = self.take(self.ctx.concat(&time, condition, 1))?;
+        let global_mish = self.take(self.ctx.activation(&global, Activation::Mish))?;
         let mut x = self.take(self.ctx.permute(sample, &[0, 2, 1]))?;
         let mut skips = Vec::new();
         for i in 0..3 {
             let p = format!("diffusion.unet.down_modules.{i}");
-            x = self.residual(&x, &global, &format!("{p}.0"))?;
-            x = self.residual(&x, &global, &format!("{p}.1"))?;
+            x = self.residual(&x, &global_mish, &format!("{p}.0"))?;
+            x = self.residual(&x, &global_mish, &format!("{p}.1"))?;
             skips.push(x.clone());
             if i < 2 {
                 x = self.conv1d(&x, &format!("{p}.2"), 2, 1, false)?;
             }
         }
         for i in 0..2 {
-            x = self.residual(&x, &global, &format!("diffusion.unet.mid_modules.{i}"))?;
+            x = self.residual(&x, &global_mish, &format!("diffusion.unet.mid_modules.{i}"))?;
         }
         for i in 0..2 {
             let p = format!("diffusion.unet.up_modules.{i}");
             x = self.take(self.ctx.concat(&x, &skips.pop().unwrap(), 1))?;
-            x = self.residual(&x, &global, &format!("{p}.0"))?;
-            x = self.residual(&x, &global, &format!("{p}.1"))?;
+            x = self.residual(&x, &global_mish, &format!("{p}.0"))?;
+            x = self.residual(&x, &global_mish, &format!("{p}.1"))?;
             x = self.conv1d(&x, &format!("{p}.2"), 2, 1, true)?;
         }
         x = self.conv_block(&x, "diffusion.unet.final_conv.0")?;
