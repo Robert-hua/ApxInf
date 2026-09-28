@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
-// Version 1: contiguous F32 tensors; operations are prepared before graph capture.
+// Contiguous F32 storage; operations are prepared before graph capture.
+// Conv kind 1/2 p[14]: 0=context precision, 1=BF16 (requires BF16 context).
+// Zero-initialized existing callers retain their original behavior.
 struct apx_tensor_spec { int32_t kind; int32_t p[24]; float f[4]; };
 extern "C" {
 const char* apx_tensor_error();

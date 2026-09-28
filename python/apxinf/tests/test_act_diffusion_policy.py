@@ -77,3 +77,23 @@ def test_diffusion_ddpm10_noise_contract():
     np.testing.assert_array_equal(r.calls[-1][2][-1],np.zeros((56,2)))
     assert policy.metadata['denoising_steps']==10
     with pytest.raises(ValueError):policy.infer(obs,noise=np.zeros((101,56,2),np.float32))
+
+
+def test_diffusion_precision_plan_uses_named_asset_and_rejects_ignored_plan(tmp_path, monkeypatch):
+    import json
+    import apxinf
+    _, runner, adapter, config = make(DiffusionPolicy)
+    (tmp_path/'config.json').write_text(json.dumps(config))
+    (tmp_path/'adapter.json').write_text(json.dumps(adapter))
+    plan=tmp_path/'plan.json';plan.write_text('{"version":1,"layers":["x"],"timesteps":[0]}')
+    calls=[]
+    class Factory:
+        @staticmethod
+        def load(*args, **kwargs): calls.append((args,kwargs));return runner
+    monkeypatch.setitem(apxinf.__dict__,'ModelRunner',Factory)
+    DiffusionPolicy.from_pretrained(tmp_path,model_variant='fp8_dynamic',fp8_plan=plan)
+    assert calls[0][1]['assets']=={'fp8_plan':plan}
+    assert calls[0][1]['model_variant']=='fp8_dynamic'
+    for kwargs in ({'model_variant':'bf16'},{'model_variant':'fp8_dynamic','model_runner':runner}):
+        with pytest.raises(ValueError,match='fp8_plan'):
+            DiffusionPolicy.from_pretrained(tmp_path,fp8_plan=plan,**kwargs)

@@ -251,3 +251,27 @@ fn bf16_linear_fused_bias_and_graph_match_independent_definition() {
         close(&y.read().unwrap(),&(0..rows*outputs).map(|i|round(bv[i%outputs])).collect::<Vec<_>>(),0.);
     }
 }
+
+#[test]
+fn explicit_bf16_convolution_in_fp8_context_preserves_precision_and_graph_lifetime() {
+    use apxinf_cuda_next::tensor_ops::ConvPrecision;
+    let values=(0..128*17).map(|i|((i%61)as f32-30.)*0.0137).collect::<Vec<_>>();
+    let weights=(0..128*128*3).map(|i|((i%37)as f32-18.)*0.00231).collect::<Vec<_>>();
+    let reference=Context::with_bf16(0).unwrap();
+    let rx=reference.tensor(&[1,128,1,17],&values).unwrap();
+    let rw=reference.tensor(&[128,128,1,3],&weights).unwrap();
+    let (ry,rop)=reference.conv2d(&rx,&rw,None,[1,1],[0,1],false).unwrap();rop.run().unwrap();
+    let expected=ry.read().unwrap();
+    let mixed=Context::with_fp8_conv1d(0).unwrap();
+    let x=mixed.zeros(&[1,128,1,17]).unwrap();x.write(&values).unwrap();
+    let w=mixed.tensor(&[128,128,1,3],&weights).unwrap();
+    let (y,op)=mixed.conv2d_with_precision(&x,&w,None,[1,1],[0,1],false,ConvPrecision::Bf16).unwrap();
+    let (q,qop)=mixed.conv2d(&x,&w,None,[1,1],[0,1],false).unwrap();
+    op.run().unwrap();qop.run().unwrap();close(&y.read().unwrap(),&expected,0.);
+    assert!(q.read().unwrap().iter().zip(&expected).any(|(a,b)|a!=b));
+    let graph=mixed.capture(&[op,qop]).unwrap();drop(w);drop(mixed);
+    x.write(&vec![0.;values.len()]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.;expected.len()],0.);
+    x.write(&values).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&expected,0.);
+    let f32ctx=Context::new(0).unwrap();
+    assert!(f32ctx.conv2d_with_precision(&rx,&rw,None,[1,1],[0,1],false,ConvPrecision::Bf16).is_err());
+}

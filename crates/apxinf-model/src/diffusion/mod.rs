@@ -18,7 +18,7 @@ fn load(
     if options.precision != crate::ModelPrecision::Auto
         || options.calibration_path.is_some()
         || options.uniform_fp8_scale.is_some()
-        || !options.assets.is_empty()
+        || options.assets.keys().any(|key| key != "fp8_plan")
         || options.config.is_some()
         || options.synthetic.is_some()
         || !matches!(
@@ -40,6 +40,13 @@ fn load(
         Some("fp8_dynamic") => "fp8_dynamic",
         _ => "f32",
     };
+    let fp8_plan = if let Some(plan_path) = options.assets.get("fp8_plan") {
+        if variant != "fp8_dynamic" {
+            return Err(Error::Other("fp8_plan requires explicit fp8_dynamic variant".into()));
+        }
+        Some(config::Fp8Plan::parse(&std::fs::read_to_string(plan_path)
+            .map_err(|e|Error::Other(e.to_string()))?,steps).map_err(Error::Other)?)
+    } else { None };
     let ctx = if variant == "fp8_dynamic" {
         apxinf_cuda_next::tensor_ops::Context::with_fp8_conv1d(index)
     } else if variant == "bf16" {
@@ -51,7 +58,7 @@ fn load(
     }
     .map_err(Error::Other)?;
     let mut w = weights::Weights::load(path, &ctx).map_err(Error::Other)?;
-    let model = model::Model::build(ctx, &mut w, steps).map_err(Error::Other)?;
+    let model = model::Model::build(ctx, &mut w, steps, fp8_plan.as_ref()).map_err(Error::Other)?;
     Ok(LoadedModel::Vla(Box::new(model_runner::ModelRunner::new(
         model, variant, options.autotune,
     )?)))

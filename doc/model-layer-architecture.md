@@ -335,3 +335,18 @@ See the [implemented component view](model-lifecycle/architecture.md#implemented
 [callable lifecycle contract](model-lifecycle/lifecycle.md#implemented-pi05-preparation-contract)
 and [migration tracker](model-lifecycle/migration.md) for qualification and scope.
 WallOSS and GR00T retain their previous implementations pending their own stages.
+
+Diffusion additionally accepts an experimental named asset `fp8_plan` with
+explicit `version: 1`, unique eligible Conv1d `layers` and selected DDPM
+`timesteps`. Only `fp8_dynamic` accepts it. The family owns validation and
+precision composition: all unselected layers/steps stay BF16, and both fixed
+operation lists share the same U-Net topology method. The generic tensor
+backend exposes a per-operation BF16 precision constraint, not a model-name
+filter. Graph construction fixes the step choices; inference performs no
+plan parsing, allocation or host tensor math. ApexForge v23 verified the v22
+binary after reconnecting to Thor: the fixed ResNet18/DDPM10 `tail0-core`
+plan (14 deep convolutions at t=0, remaining layers/steps BF16) passes 606
+validation anchors and 606 held-out anchors across three noise seeds, with
+zero pointwise violations under the unchanged development budget. It requires
+`APXINF_TENSOR_BF16_LAYOUT=reference_unet` and no im2row override. This evidence
+does not qualify broad FP8, other profiles, formal release or robot deployment.

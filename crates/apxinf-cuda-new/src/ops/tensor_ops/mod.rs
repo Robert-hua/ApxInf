@@ -70,6 +70,9 @@ impl Drop for ContextInner {
         }
     }
 }
+/// Per-operation precision constraint, fixed before capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvPrecision { ContextDefault, Bf16 }
 #[derive(Clone)]
 pub struct Context(Rc<ContextInner>);
 impl Context {
@@ -234,6 +237,17 @@ impl Context {
         pad: [usize; 2],
         transpose: bool,
     ) -> Result<(Tensor, Operation)> {
+        self.conv2d_with_precision(x, w, bias, stride, pad, transpose, ConvPrecision::ContextDefault)
+    }
+    /// Keep a sensitive convolution in BF16 within a mixed FP8 context.
+    /// This never changes context precision or dispatch during graph replay.
+    pub fn conv2d_with_precision(
+        &self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>,
+        stride: [usize; 2], pad: [usize; 2], transpose: bool, precision: ConvPrecision,
+    ) -> Result<(Tensor, Operation)> {
+        if precision == ConvPrecision::Bf16 && !self.is_bf16() {
+            return Err("BF16 convolution override requires a BF16 or mixed FP8 context".into());
+        }
         if !w.immutable.get() {
             return Err("convolution requires immutable weights".into());
         }
@@ -275,7 +289,7 @@ impl Context {
         let op = self.prepare(
             if transpose { 2 } else { 1 },
             &[
-                n, ci, h, ww, co, kh, kw, 0, oh, ow, pad[0], pad[1], stride[0], stride[1],
+                n, ci, h, ww, co, kh, kw, 0, oh, ow, pad[0], pad[1], stride[0], stride[1], usize::from(precision == ConvPrecision::Bf16),
             ],
             &[],
             &a,

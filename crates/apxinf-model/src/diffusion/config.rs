@@ -69,3 +69,42 @@ mod tests {
         for steps in [0,1,9,20,101] {assert!(timesteps(steps).is_err());}
     }
 }
+
+/// Explicit experimental precision plan, carried through the existing named assets seam.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Fp8Plan {
+    pub version: u32,
+    pub layers: Vec<String>,
+    pub timesteps: Vec<usize>,
+}
+impl Fp8Plan {
+    pub fn parse(raw: &str, steps: usize) -> Result<Self> {
+        let plan: Self = serde_json::from_str(raw).map_err(|e|e.to_string())?;
+        let unique_layers = plan.layers.iter().collect::<std::collections::HashSet<_>>();
+        let unique_steps = plan.timesteps.iter().collect::<std::collections::HashSet<_>>();
+        let schedule = timesteps(steps)?;
+        if plan.version != 1 || plan.layers.is_empty() || plan.timesteps.is_empty()
+            || unique_layers.len() != plan.layers.len() || unique_steps.len() != plan.timesteps.len()
+            || plan.timesteps.iter().any(|t|!schedule.contains(t)) {
+            return Err("invalid FP8 plan version, duplicate/empty layer or timestep, or unsupported timestep".into());
+        }
+        Ok(plan)
+    }
+}
+#[cfg(test)]
+mod fp8_tests {
+    use super::*;
+    #[test]
+    fn precision_plan_rejects_ambiguous_or_inapplicable_schedules() {
+        assert!(Fp8Plan::parse(r#"{"version":1,"layers":["layer"],"timesteps":[10,0]}"#,10).is_ok());
+        for raw in [r#"{"version":2,"layers":["a"],"timesteps":[0]}"#,
+                    r#"{"version":1,"layers":[],"timesteps":[0]}"#,
+                    r#"{"version":1,"layers":["a","a"],"timesteps":[0]}"#,
+                    r#"{"version":1,"layers":["a"],"timesteps":[0,0]}"#,
+                    r#"{"version":1,"layers":["a"],"timesteps":[1]}"#,
+                    r#"{"version":1,"layers":["a"],"timesteps":[0],"typo":true}"#] {
+            assert!(Fp8Plan::parse(raw,10).is_err(),"{raw}");
+        }
+    }
+}

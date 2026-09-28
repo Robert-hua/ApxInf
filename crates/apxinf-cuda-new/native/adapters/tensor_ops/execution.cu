@@ -130,7 +130,7 @@ extern "C" int apx_tensor_prepare(void*c,const apx_tensor_spec*s,const float*a,c
  }
  // FP8 is an explicit mixed-precision context, never selected for BF16 silently.
  // Narrow input/output projections and transposed/2D convolutions remain BF16.
- if(e->ctx->fp8_conv&&s->kind==1&&p[1]>=128&&p[4]>=128&&p[1]%16==0&&p[4]%16==0&&p[2]==1&&p[5]==1&&p[8]==1&&p[10]==0&&p[12]==1){
+ if(e->ctx->fp8_conv&&p[14]==0&&s->kind==1&&p[1]>=128&&p[4]>=128&&p[1]%16==0&&p[4]%16==0&&p[2]==1&&p[5]==1&&p[8]==1&&p[10]==0&&p[12]==1){
   size_t columns=(size_t(p[9])+15)/16*16,k=size_t(p[1])*p[6];
   if(k*columns+2*size_t(p[4])*columns>64*1024*1024)throw std::runtime_error("FP8 Conv1d scratch exceeds budget");
   e->padded_columns=int(columns);e->fp8=std::make_unique<Fp8Conv>();auto&q=*e->fp8;

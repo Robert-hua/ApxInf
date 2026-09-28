@@ -9,15 +9,17 @@ from ..registry import register_policy
 @register_policy("diffusion")
 class DiffusionPolicy:
     @classmethod
-    def from_pretrained(cls, model_dir, *, device="cuda:0", model_runner=None, model_variant="f32", autotune=False):
+    def from_pretrained(cls, model_dir, *, device="cuda:0", model_runner=None, model_variant="f32", autotune=False, fp8_plan=None):
         root = Path(model_dir)
         config = json.loads((root / "config.json").read_text())
         adapter = json.loads((root / "adapter.json").read_text())
         if config["type"] != "diffusion":
             raise ValueError("Diffusion policy requires Diffusion checkpoint")
+        if fp8_plan is not None and (model_variant != "fp8_dynamic" or model_runner is not None):
+            raise ValueError("fp8_plan requires native fp8_dynamic loading without an injected runner")
         if model_runner is None:
             from apxinf import ModelRunner
-            model_runner = ModelRunner.load("diffusion", root, device=device, model_variant=model_variant, autotune=autotune)
+            model_runner = ModelRunner.load("diffusion", root, device=device, model_variant=model_variant, autotune=autotune, assets={"fp8_plan": Path(fp8_plan)} if fp8_plan is not None else None)
         return cls(config, adapter, model_runner)
 
     def __init__(self, config, adapter, model_runner):

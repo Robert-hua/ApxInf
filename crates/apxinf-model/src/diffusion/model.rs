@@ -1,6 +1,6 @@
 //! Diffusion Policy model math: ResNet condition, conditional U-Net and DDPM100.
 use super::weights::{Result, Weights};
-use apxinf_cuda_next::tensor_ops::{Activation, Context, Operation, Tensor};
+use apxinf_cuda_next::tensor_ops::{Activation, Context, ConvPrecision, Operation, Tensor};
 pub(super) struct Model {
     pub ctx: Context,
     pub image: Tensor,
@@ -11,6 +11,8 @@ pub(super) struct Model {
     pub diagnostics: Vec<(String, Tensor)>,
 }
 pub(super) struct Builder<'a> {
+    pub fp8_layers: Option<std::collections::HashSet<String>>,
+    pub matched_fp8: std::collections::HashSet<String>,
     pub ctx: Context,
     pub w: &'a mut Weights,
     pub ops: Vec<Operation>,
@@ -110,11 +112,19 @@ impl<'a> Builder<'a> {
         let bias = self.w.get(&format!("{name}.bias"))?;
         let xs = x.shape();
         let x4 = x.reshape(&[xs[0], xs[1], 1, xs[2]])?;
-        let y =
-            self.take(
-                self.ctx
-                    .conv2d(&x4, &w, Some(&bias), [1, stride], [0, pad], transpose),
-            )?;
+        let precision = match &self.fp8_layers {
+            Some(layers) if layers.contains(name) => {
+                if transpose || xs[1] < 128 || s[0] < 128 || xs[1] % 16 != 0 || s[0] % 16 != 0 {
+                    return Err(format!("FP8 plan selects ineligible Conv1d: {name}"));
+                }
+                self.matched_fp8.insert(name.to_string());
+                ConvPrecision::ContextDefault
+            }
+            Some(_) => ConvPrecision::Bf16,
+            None => ConvPrecision::ContextDefault,
+        };
+        let y = self.take(self.ctx.conv2d_with_precision(
+            &x4, &w, Some(&bias), [1, stride], [0, pad], transpose, precision))?;
         y.reshape(&[y.shape()[0], y.shape()[1], y.shape()[3]])
     }
     fn conv_block(&mut self, x: &Tensor, name: &str) -> Result<Tensor> {
@@ -145,8 +155,42 @@ impl<'a> Builder<'a> {
         self.add(&y, &skip)
     }
 }
+impl<'a> Builder<'a> {
+    fn unet(&mut self, sample: &Tensor, time_input: &Tensor, condition: &Tensor) -> Result<Tensor> {
+        let mut time = self.linear(time_input, "diffusion.unet.diffusion_step_encoder.1")?;
+        time = self.take(self.ctx.activation(&time, Activation::Mish))?;
+        time = self.cast_activation(&time)?;
+        time = self.linear(&time, "diffusion.unet.diffusion_step_encoder.3")?;
+        let global = self.take(self.ctx.concat(&time, condition, 1))?;
+        let mut x = self.take(self.ctx.permute(sample, &[0, 2, 1]))?;
+        let mut skips = Vec::new();
+        for i in 0..3 {
+            let p = format!("diffusion.unet.down_modules.{i}");
+            x = self.residual(&x, &global, &format!("{p}.0"))?;
+            x = self.residual(&x, &global, &format!("{p}.1"))?;
+            skips.push(x.clone());
+            if i < 2 {
+                x = self.conv1d(&x, &format!("{p}.2"), 2, 1, false)?;
+            }
+        }
+        for i in 0..2 {
+            x = self.residual(&x, &global, &format!("diffusion.unet.mid_modules.{i}"))?;
+        }
+        for i in 0..2 {
+            let p = format!("diffusion.unet.up_modules.{i}");
+            x = self.take(self.ctx.concat(&x, &skips.pop().unwrap(), 1))?;
+            x = self.residual(&x, &global, &format!("{p}.0"))?;
+            x = self.residual(&x, &global, &format!("{p}.1"))?;
+            x = self.conv1d(&x, &format!("{p}.2"), 2, 1, true)?;
+        }
+        x = self.conv_block(&x, "diffusion.unet.final_conv.0")?;
+        x = self.conv1d(&x, "diffusion.unet.final_conv.1", 1, 0, false)?;
+        let epsilon = self.take(self.ctx.permute(&x, &[0, 2, 1]))?;
+        Ok(epsilon)
+    }
+}
 impl Model {
-    pub fn build(ctx: Context, w: &mut Weights, steps: usize) -> Result<Self> {
+    pub fn build(ctx: Context, w: &mut Weights, steps: usize, fp8_plan: Option<&super::config::Fp8Plan>) -> Result<Self> {
         let timesteps = super::config::timesteps(steps)?;
         let image = ctx.zeros(&[1, 3, 360, 640])?;
         let state = ctx.zeros(&[1, 33])?;
@@ -154,6 +198,8 @@ impl Model {
         let noise = ctx.zeros(&[steps + 1, 56, 2])?;
         let sample = ctx.zeros(&[1, 56, 2])?;
         let mut b = Builder {
+            fp8_layers: fp8_plan.map(|_|std::collections::HashSet::new()),
+            matched_fp8: std::collections::HashSet::new(),
             ctx: ctx.clone(),
             w,
             ops: Vec::new(),
@@ -205,37 +251,19 @@ impl Model {
             .push(ctx.copy_into(&noise.view(0, &[1, 56, 2])?, &sample)?);
         let prefix_ops = std::mem::take(&mut b.ops);
         let time_input = ctx.zeros(&[1, 128])?;
-        let mut time = b.linear(&time_input, "diffusion.unet.diffusion_step_encoder.1")?;
-        time = b.take(ctx.activation(&time, Activation::Mish))?;
-        time = b.cast_activation(&time)?;
-        time = b.linear(&time, "diffusion.unet.diffusion_step_encoder.3")?;
-        let global = b.take(ctx.concat(&time, &condition, 1))?;
-        let mut x = b.take(ctx.permute(&sample, &[0, 2, 1]))?;
-        let mut skips = Vec::new();
-        for i in 0..3 {
-            let p = format!("diffusion.unet.down_modules.{i}");
-            x = b.residual(&x, &global, &format!("{p}.0"))?;
-            x = b.residual(&x, &global, &format!("{p}.1"))?;
-            skips.push(x.clone());
-            if i < 2 {
-                x = b.conv1d(&x, &format!("{p}.2"), 2, 1, false)?;
-            }
-        }
-        for i in 0..2 {
-            x = b.residual(&x, &global, &format!("diffusion.unet.mid_modules.{i}"))?;
-        }
-        for i in 0..2 {
-            let p = format!("diffusion.unet.up_modules.{i}");
-            x = b.take(ctx.concat(&x, &skips.pop().unwrap(), 1))?;
-            x = b.residual(&x, &global, &format!("{p}.0"))?;
-            x = b.residual(&x, &global, &format!("{p}.1"))?;
-            x = b.conv1d(&x, &format!("{p}.2"), 2, 1, true)?;
-        }
-        x = b.conv_block(&x, "diffusion.unet.final_conv.0")?;
-        x = b.conv1d(&x, "diffusion.unet.final_conv.1", 1, 0, false)?;
-        let epsilon = b.take(ctx.permute(&x, &[0, 2, 1]))?;
-        b.record("unet.last_epsilon", &epsilon);
+        let baseline_epsilon = b.unet(&sample, &time_input, &condition)?;
         let unet_ops = std::mem::take(&mut b.ops);
+        let alternate = if let Some(plan) = fp8_plan {
+            b.fp8_layers = Some(plan.layers.iter().cloned().collect());
+            let e = b.unet(&sample, &time_input, &condition)?;
+            if b.matched_fp8.len() != plan.layers.len() {
+                let unknown = plan.layers.iter().filter(|n|!b.matched_fp8.contains(*n)).collect::<Vec<_>>();
+                return Err(format!("FP8 plan contains unknown layers: {unknown:?}"));
+            }
+            Some((e, std::mem::take(&mut b.ops)))
+        } else { None };
+        let epsilon = if alternate.is_some() { ctx.zeros(&[1,56,2])? } else { baseline_epsilon.clone() };
+        b.record("unet.last_epsilon", &epsilon);
         let mut operations = prefix_ops;
         // Diffusers squaredcos_cap_v2 creates float32 betas from this f64 formula.
         let alpha_bar = |t: f64| {
@@ -266,7 +294,12 @@ impl Model {
             }
             let embedding = ctx.tensor(&[1, 128], &values)?;
             operations.push(ctx.copy_into(&embedding, &time_input)?);
-            operations.extend(unet_ops.iter().cloned());
+            let (step_epsilon, step_ops) = if fp8_plan.is_some_and(|p|p.timesteps.contains(&t)) {
+                let (e, ops) = alternate.as_ref().expect("prepared FP8 plan");
+                (e, ops)
+            } else { (&baseline_epsilon, &unet_ops) };
+            operations.extend(step_ops.iter().cloned());
+            if alternate.is_some() { operations.push(ctx.copy_into(step_epsilon, &epsilon)?); }
             let snapshot = ctx.zeros(&[1, 56, 2])?;
             operations.push(ctx.copy_into(&epsilon, &snapshot)?);
             b.diagnostics.push((format!("ddpm.{t}.epsilon"), snapshot));

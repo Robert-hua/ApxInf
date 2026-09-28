@@ -163,5 +163,15 @@ Prepared BF16 convolution candidates (experimental):
   native candidate returns an error. No external engine or host tensor math.
 
 These paths have separate operator/Graph tests; they remain outside the unified
-GEMM/Attention recipe registry. FP8 public-model quality is **failed**, not
-implied by operator correctness or speed. See ApexForge v20 evidence.
+GEMM/Attention recipe registry. Broad FP8 public-model quality remains
+**failed**, not implied by operator correctness or speed. ApexForge v23
+separately qualifies one explicit Diffusion layer/timestep plan under its
+development numerical and label-quality budget; it is not a general FP8 or
+formal release guarantee. The model family owns that plan.
+
+`conv2d_with_precision(..., ConvPrecision::Bf16)` explicitly keeps one
+prepared convolution in BF16 inside a BF16/mixed FP8 context. A plain FP32
+context rejects this override. `ContextDefault` preserves `conv2d` behavior.
+The constraint is lowered as Conv spec p[14], fixed at prepare, retained by
+the operation and graph; it does not mutate context precision at replay.
+Model layer names and timestep schedules never enter the backend.
