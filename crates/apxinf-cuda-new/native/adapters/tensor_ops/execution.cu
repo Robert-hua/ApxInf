@@ -121,12 +121,16 @@ extern "C" int apx_tensor_prepare(void*c,const apx_tensor_spec*s,const float*a,c
  // Experimental provider choice is frozen during prepare; enqueue does not read env,
  // allocate, or select algorithms. Other shapes/precisions retain the cuDNN path.
  const char*conv1d=std::getenv("APXINF_TENSOR_FP32_CONV1D");
- if(conv1d&&std::strcmp(conv1d,"im2col")==0&&s->kind==1&&!e->ctx->bf16&&!e->ctx->tf32&&p[2]==1&&p[5]==1&&p[8]==1&&p[10]==0&&p[12]==1){
+ const bool im2col_shape=s->kind==1&&!e->ctx->bf16&&!e->ctx->tf32&&p[2]==1&&p[5]==1&&p[8]==1&&p[10]==0&&p[12]==1;
+ if(p[15]!=0&&p[15]!=1)throw std::runtime_error("unsupported convolution provider");
+ if(p[15]==1&&!im2col_shape)throw std::runtime_error("explicit im2col requires FP32 forward Conv1d");
+ if((p[15]==1||(conv1d&&std::strcmp(conv1d,"im2col")==0))&&im2col_shape){
   size_t elements=size_t(p[1])*p[6]*p[9];
   if(elements<=size_t(64*1024*1024)/sizeof(float)){
    e->im2col_1d=true;e->workspace_bytes=elements*sizeof(float);ck(cudaMalloc(&e->workspace,e->workspace_bytes));
    *out=e.release();return;
   }
+  if(p[15]==1)throw std::runtime_error("explicit im2col scratch exceeds 64 MiB");
  }
  // FP8 is an explicit mixed-precision context, never selected for BF16 silently.
  // Narrow input/output projections and transposed/2D convolutions remain BF16.

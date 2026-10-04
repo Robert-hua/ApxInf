@@ -182,3 +182,14 @@ from tanh-approximated GELU. It retains the existing prepare/run/capture lifetim
 there is no allocation, host tensor computation or precision change during replay.
 The focused `exact_gelu_matches_erf_golden_and_rebinds_graph_input` test covers
 negative tails, zero, positive inputs, input rebinding and retained output.
+
+`Context::conv1d_im2col` selects the prepared FP32 im2col/GEMM provider for
+NCHW `[B,C,1,L]` and OIHW `[Cout,Cin,1,K]`, with explicit stride/padding.
+Conv spec p[15]=1 records this selection; zero retains existing dispatch.
+TF32/BF16 contexts, incompatible shapes and scratch over 64 MiB are rejected.
+Scratch and GEMM arguments are prepared once; replay has no provider lookup or
+allocation. Kart DP selects this path only for forward temporal convolutions,
+leaving transposed and vision convolutions on cuDNN. Other families are unchanged.
+The real-shape f64/Graph test covers both library and explicit GEMM providers;
+a separate test rejects unsupported precisions. This extends prepared tensor ops,
+not the unified recipe registry.

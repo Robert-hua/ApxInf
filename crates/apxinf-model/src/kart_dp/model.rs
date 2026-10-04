@@ -72,11 +72,14 @@ impl Builder<'_> {
         let bias = self.w.get(&format!("{n}.bias"))?;
         let s = x.shape();
         let x = x.reshape(&[s[0], s[1], 1, s[2]])?;
-        let y =
-            self.take(
-                self.ctx
-                    .conv2d(&x, &w, Some(&bias), [1, stride], [0, pad], transpose),
-            )?;
+        // Thor profiling: forward temporal convolutions dominate the fixed profile.
+        // Select prepared FP32 GEMM locally; transposed/vision convolutions retain cuDNN.
+        let operation = if transpose {
+            self.ctx.conv2d(&x,&w,Some(&bias),[1,stride],[0,pad],true)
+        } else {
+            self.ctx.conv1d_im2col(&x,&w,Some(&bias),stride,pad)
+        };
+        let y = self.take(operation)?;
         y.reshape(&[y.shape()[0], y.shape()[1], y.shape()[3]])
     }
     fn vision(&mut self, image: &Tensor) -> Result<Tensor> {

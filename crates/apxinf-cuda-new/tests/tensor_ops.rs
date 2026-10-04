@@ -150,6 +150,7 @@ fn conv1d_real_shape_stride_bias_and_graph_match_f64_reference() {
         let x=ctx.zeros(&[batch,cin,1,length]).unwrap();x.write(&xv).unwrap();
         let w=ctx.tensor(&[cout,cin,1,kernel],&wv).unwrap();let bias=ctx.tensor(&[cout],&bv).unwrap();
         let (y,op)=ctx.conv2d(&x,&w,Some(&bias),[1,stride],[0,pad],false).unwrap();
+        let (gemm,gop)=ctx.conv1d_im2col(&x,&w,Some(&bias),stride,pad).unwrap();
         let mut expected=vec![0.;batch*cout*out_length];
         for n in 0..batch {for co in 0..cout {for t in 0..out_length {
             let mut sum=bv[co] as f64;
@@ -160,10 +161,22 @@ fn conv1d_real_shape_stride_bias_and_graph_match_f64_reference() {
             expected[(n*cout+co)*out_length+t]=sum as f32;
         }}}
         op.run().unwrap();close(&y.read().unwrap(),&expected,2e-5);
-        let graph=ctx.capture(&[op]).unwrap();
+        gop.run().unwrap();close(&gemm.read().unwrap(),&expected,2e-5);
+        let graph=ctx.capture(&[op,gop]).unwrap();
         x.write(&vec![0.;xv.len()]).unwrap();graph.replay().unwrap();
         close(&y.read().unwrap(),&(0..expected.len()).map(|i|bv[(i/out_length)%cout]).collect::<Vec<_>>(),1e-6);
+        close(&gemm.read().unwrap(),&y.read().unwrap(),1e-6);
         x.write(&xv).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&expected,2e-5);
+        close(&gemm.read().unwrap(),&expected,2e-5);
+    }
+}
+
+#[test]
+fn explicit_im2col_rejects_other_precisions() {
+    for ctx in [Context::with_tf32(0).unwrap(),Context::with_bf16(0).unwrap()] {
+        let x=ctx.zeros(&[1,2,1,4]).unwrap();
+        let w=ctx.tensor(&[2,2,1,3],&[1.;12]).unwrap();
+        assert!(ctx.conv1d_im2col(&x,&w,None,1,1).is_err());
     }
 }
 

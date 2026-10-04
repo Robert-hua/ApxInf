@@ -245,6 +245,22 @@ impl Context {
         &self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>,
         stride: [usize; 2], pad: [usize; 2], transpose: bool, precision: ConvPrecision,
     ) -> Result<(Tensor, Operation)> {
+        self.conv2d_impl(x, w, bias, stride, pad, transpose, precision, false)
+    }
+    /// Explicit prepared FP32 im2col + GEMM for [B,C,1,L] Conv1d.
+    /// Reuses scratch, rejects TF32/BF16 and never changes another operation's provider.
+    pub fn conv1d_im2col(
+        &self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize,
+    ) -> Result<(Tensor, Operation)> {
+        if x.shape.len()!=4 || w.shape.len()!=4 || x.shape[2]!=1 || w.shape[2]!=1 {
+            return Err("im2col Conv1d requires [B,C,1,L] and [Cout,Cin,1,K]".into());
+        }
+        self.conv2d_impl(x,w,bias,[1,stride],[0,pad],false,ConvPrecision::ContextDefault,true)
+    }
+    fn conv2d_impl(
+        &self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>,
+        stride: [usize; 2], pad: [usize; 2], transpose: bool, precision: ConvPrecision, im2col: bool,
+    ) -> Result<(Tensor, Operation)> {
         if precision == ConvPrecision::Bf16 && !self.is_bf16() {
             return Err("BF16 convolution override requires a BF16 or mixed FP8 context".into());
         }
@@ -289,7 +305,7 @@ impl Context {
         let op = self.prepare(
             if transpose { 2 } else { 1 },
             &[
-                n, ci, h, ww, co, kh, kw, 0, oh, ow, pad[0], pad[1], stride[0], stride[1], usize::from(precision == ConvPrecision::Bf16),
+                n, ci, h, ww, co, kh, kw, 0, oh, ow, pad[0], pad[1], stride[0], stride[1], usize::from(precision == ConvPrecision::Bf16), usize::from(im2col),
             ],
             &[],
             &a,

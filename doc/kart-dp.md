@@ -13,8 +13,11 @@ The maintained CUDA path is in `crates/apxinf-model/src/kart_dp/`:
 `model` owns DINO, pooling, conditioning, U-Net and DDIM math;
 `model_runner` owns buffers, eager execution, graph capture and tensor binding.
 `policies/impls/kart_dp.py` owns observation preprocessing and action clipping.
-No Torch/TensorRT runtime is used by this family. Offline export/reference tools
-remain in the parent ApexForge evaluation directory and require the original
+No Torch/TensorRT runtime is used by this family.
+The forward temporal convolutions explicitly select prepared FP32 im2col/GEMM;
+vision and transposed convolutions retain cuDNN. This family-local choice needs
+no process-wide provider environment override and does not change other models.
+Offline export/reference tools remain in the parent ApexForge evaluation directory and require the original
 training source. A training `.pt` must first be exported; ordinary and EMA
 weights are different candidates and the choice is explicit in the export.
 

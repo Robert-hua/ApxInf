@@ -2,6 +2,7 @@
 #include <stdint.h>
 // Contiguous F32 storage; operations are prepared before graph capture.
 // Conv kind 1/2 p[14]: 0=context precision, 1=BF16 (requires BF16 context).
+// Conv kind 1 p[15]: 1=explicit FP32 im2col Conv1d, 0=existing provider selection.
 // Zero-initialized existing callers retain their original behavior.
 struct apx_tensor_spec { int32_t kind; int32_t p[24]; float f[4]; };
 extern "C" {
