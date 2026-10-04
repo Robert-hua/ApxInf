@@ -57,3 +57,19 @@ def test_explicit_external_vision_uses_raw_crop_and_owned_feature_handoff():
     np.testing.assert_array_equal(features,np.arange(24576,dtype=np.float32).reshape(1,-1))
     np.testing.assert_array_equal(state,np.zeros((1,248)))
     p.close();assert vision.closed
+
+@pytest.mark.parametrize('field', ['input_contract', 'engine_sha256', 'weights_sha256'])
+def test_external_vision_rejects_unpaired_artifacts_before_cuda(tmp_path, monkeypatch, field):
+    import hashlib,json,sys,types
+    from apxinf.policies.impls.kart_dp_trt import KartTrtVision
+    # No CUDA or TensorRT entrypoint may be reached for mismatched identities.
+    monkeypatch.setitem(sys.modules,'tensorrt',types.SimpleNamespace())
+    engine=tmp_path/'vision.engine';engine.write_bytes(b'engine-test-fixture')
+    weights=tmp_path/'model.safetensors';weights.write_bytes(b'weight-test-fixture')
+    metadata={'input_contract':'kart_dp_vision_features_v1',
+              'engine_sha256':hashlib.sha256(engine.read_bytes()).hexdigest(),
+              'weights_sha256':hashlib.sha256(weights.read_bytes()).hexdigest()}
+    metadata[field]='mismatch'
+    engine.with_suffix('.json').write_text(json.dumps(metadata))
+    with pytest.raises(ValueError,match='identity mismatch'):
+        KartTrtVision(engine,tmp_path)
