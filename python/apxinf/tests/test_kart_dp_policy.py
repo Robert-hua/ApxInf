@@ -48,6 +48,7 @@ def test_explicit_external_vision_uses_raw_crop_and_owned_feature_handoff():
             self.input=x.copy()
             return np.arange(24576,dtype=np.float32).reshape(1,-1)
         def close(self):self.closed=True
+        def prepare(self,mode):self.execution=mode
     vision=Vision();p.vision=vision
     image=np.zeros((4,240,320,3),np.uint8);image[:,8:232,16:304]=255
     p.infer({'observation.images.front':image,'observation.state':np.ones((4,62))})
@@ -56,6 +57,9 @@ def test_explicit_external_vision_uses_raw_crop_and_owned_feature_handoff():
     features,state,_=p.model_runner.inputs
     np.testing.assert_array_equal(features,np.arange(24576,dtype=np.float32).reshape(1,-1))
     np.testing.assert_array_equal(state,np.zeros((1,248)))
+    ob={'observation.images.front':image,'observation.state':np.ones((4,62))}
+    assert p.prepare(ob,mode='graph')=='graph';assert vision.execution=='graph'
+    assert p.prepare(ob,mode='eager')=='eager';assert vision.execution=='eager'
     p.close();assert vision.closed
 
 @pytest.mark.parametrize('field', ['input_contract', 'engine_sha256', 'weights_sha256'])

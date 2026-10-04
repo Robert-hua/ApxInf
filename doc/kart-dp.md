@@ -73,7 +73,10 @@ externally owned, not silently discarded as unused keys.
 
 The initial hybrid handoff copies features through host memory (TRT D2H then
 native H2D). It uses independent streams with synchronization at the handoff;
-only the native policy portion is captured by `prepare(mode="graph")`. The
+`prepare(mode="graph")` captures separate TRT vision and native policy graphs,
+while `mode="eager"` clears both. Vision capture retains its engine, context,
+stream and stable device addresses; changing image values updates the input
+before every launch. The
 complete public call includes both engines and transfers. Do not describe this
 as all-native, zero-copy or a single whole-model graph. TensorRT/CUDA Python
 bindings are optional; loading normal `kart_dp` has no TensorRT dependency.

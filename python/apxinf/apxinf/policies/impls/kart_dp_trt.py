@@ -27,6 +27,7 @@ class KartTrtVision:
             or meta.get('weights_sha256')!=_sha(Path(model_dir)/'model.safetensors')):
             raise ValueError('TensorRT vision artifact/weights identity mismatch')
         self.metadata=meta;self.device=device;self.stream=C.c_void_p();self.dx=C.c_void_p();self.dy=C.c_void_p()
+        self.graph=C.c_void_p();self.graph_exec=C.c_void_p();self.execution='eager';self.has_input=False
         self.context=None;self.engine=None;self.runtime=None;self.closed=False
         self.cuda=C.CDLL(ctypes.util.find_library('cudart') or 'libcudart.so.13')
         for name,args in {
@@ -34,6 +35,11 @@ class KartTrtVision:
             'cudaStreamSynchronize':[C.c_void_p],'cudaStreamDestroy':[C.c_void_p],
             'cudaMalloc':[C.POINTER(C.c_void_p),C.c_size_t],'cudaFree':[C.c_void_p],
             'cudaMemcpyAsync':[C.c_void_p,C.c_void_p,C.c_size_t,C.c_int,C.c_void_p],
+            'cudaStreamBeginCapture':[C.c_void_p,C.c_int],
+            'cudaStreamEndCapture':[C.c_void_p,C.POINTER(C.c_void_p)],
+            'cudaGraphInstantiateWithFlags':[C.POINTER(C.c_void_p),C.c_void_p,C.c_ulonglong],
+            'cudaGraphLaunch':[C.c_void_p,C.c_void_p],
+            'cudaGraphExecDestroy':[C.c_void_p],'cudaGraphDestroy':[C.c_void_p],
         }.items():
             fn=getattr(self.cuda,name);fn.argtypes=args;fn.restype=C.c_int
         self.logger=trt.Logger(trt.Logger.WARNING)
@@ -56,6 +62,39 @@ class KartTrtVision:
     def _call(self,name,*args):
         status=getattr(self.cuda,name)(*args)
         if status:raise RuntimeError(f'{name} failed: CUDA {status}')
+    def _clear_graph(self):
+        if self.graph_exec.value:self.cuda.cudaGraphExecDestroy(self.graph_exec);self.graph_exec=C.c_void_p()
+        if self.graph.value:self.cuda.cudaGraphDestroy(self.graph);self.graph=C.c_void_p()
+        self.execution='eager'
+    def prepare(self,mode):
+        """Capture only TRT kernels; host copies remain outside the graph.
+
+        The policy lock serializes prepare/infer/close. Engine, context and
+        device addresses stay alive until graph destruction.
+        """
+        if self.closed:raise RuntimeError('TensorRT vision is closed')
+        if mode not in ('eager','graph'):raise ValueError('Vision mode must be eager or graph')
+        self._call('cudaSetDevice',self.device)
+        self._call('cudaStreamSynchronize',self.stream)
+        self._clear_graph()
+        if mode=='eager':return
+        if not self.has_input:raise RuntimeError('Vision needs a real input before capture')
+        # Flush lazy TRT work outside capture, as required by enqueueV3.
+        if not self.context.execute_async_v3(self.stream.value):raise RuntimeError('Vision warmup failed')
+        self._call('cudaStreamSynchronize',self.stream)
+        self._call('cudaStreamBeginCapture',self.stream,0)
+        try:
+            ok=self.context.execute_async_v3(self.stream.value)
+        except BaseException:
+            self.cuda.cudaStreamEndCapture(self.stream,C.byref(self.graph))
+            self._clear_graph();raise
+        try:
+            self._call('cudaStreamEndCapture',self.stream,C.byref(self.graph))
+            if not ok:raise RuntimeError('Vision capture execution failed')
+            self._call('cudaGraphInstantiateWithFlags',C.byref(self.graph_exec),self.graph,0)
+            self.execution='graph'
+        except BaseException:
+            self._clear_graph();raise
     def infer(self,image):
         if self.closed:raise RuntimeError('TensorRT vision is closed')
         x=np.ascontiguousarray(image,dtype=np.float32)
@@ -63,15 +102,18 @@ class KartTrtVision:
         self._call('cudaSetDevice',self.device)
         y=np.empty((1,24576),np.float32)
         self._call('cudaMemcpyAsync',self.dx,C.c_void_p(x.ctypes.data),x.nbytes,1,self.stream)
-        if not self.context.execute_async_v3(self.stream.value):raise RuntimeError('TensorRT vision execution failed')
+        if self.graph_exec.value:self._call('cudaGraphLaunch',self.graph_exec,self.stream)
+        elif not self.context.execute_async_v3(self.stream.value):raise RuntimeError('TensorRT vision execution failed')
         self._call('cudaMemcpyAsync',C.c_void_p(y.ctypes.data),self.dy,y.nbytes,2,self.stream)
         self._call('cudaStreamSynchronize',self.stream)
+        self.has_input=True
         return y
     def close(self):
         if self.closed:return
         self.closed=True
         self.cuda.cudaSetDevice(self.device)
         if self.stream.value:self.cuda.cudaStreamSynchronize(self.stream)
+        self._clear_graph()
         self.context=None;self.engine=None;self.runtime=None
         if self.dx.value:self.cuda.cudaFree(self.dx);self.dx=C.c_void_p()
         if self.dy.value:self.cuda.cudaFree(self.dy);self.dy=C.c_void_p()

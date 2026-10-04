@@ -100,6 +100,7 @@ class KartDpPolicy:
         if not self._lock.acquire(blocking=False): raise RuntimeError("kart_dp policy is busy")
         try:
             self._infer(observation,noise)
+            if self.vision is not None:self.vision.prepare(mode)
             return self.model_runner.prepare_tensors(mode)
         finally: self._lock.release()
 
