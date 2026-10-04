@@ -304,7 +304,7 @@ fn exact_gelu_matches_erf_golden_and_rebinds_graph_input() {
 }
 
 #[test]
-fn multi_warp_reductions_preserve_broadcast_before_reusing_shared_memory() {
+fn opt_in_block_reductions_preserve_broadcast_before_reusing_shared_memory() {
     let ctx=Context::new(0).unwrap();
     for width in [337usize,384] {
         let rows=32;
@@ -312,8 +312,8 @@ fn multi_warp_reductions_preserve_broadcast_before_reusing_shared_memory() {
         let x=ctx.tensor(&[rows,width],&values).unwrap();
         let w=ctx.tensor(&[width],&vec![1.;width]).unwrap();
         let b=ctx.tensor(&[width],&vec![0.;width]).unwrap();
-        let (norm,nop)=ctx.norm(&x,&w,&b,width,1,1e-6).unwrap();
-        let (prob,sop)=ctx.softmax(&x,1.).unwrap();
+        let (norm,nop)=ctx.layer_norm_block(&x,&w,&b,1e-6).unwrap();
+        let (prob,sop)=ctx.softmax_block(&x,1.).unwrap();
         let mut norms=Vec::new();let mut probs=Vec::new();
         for row in values.chunks_exact(width) {
             let mean=row.iter().map(|&v|v as f64).sum::<f64>()/width as f64;
@@ -333,4 +333,15 @@ fn multi_warp_reductions_preserve_broadcast_before_reusing_shared_memory() {
         close(&norm.read().unwrap(),&norms,2e-6);
         close(&prob.read().unwrap(),&probs,2e-7);
     }
+}
+
+#[test]
+fn block_reduction_contract_rejects_invalid_affine_and_scale() {
+    let ctx=Context::new(0).unwrap();
+    let x=ctx.tensor(&[2,3],&[1.;6]).unwrap();
+    let w=ctx.tensor(&[3],&[1.;3]).unwrap();
+    let wrong=ctx.tensor(&[1,3],&[0.;3]).unwrap();
+    assert!(ctx.layer_norm_block(&x,&w,&wrong,1e-6).is_err());
+    assert!(ctx.layer_norm_block(&x,&w,&w,0.).is_err());
+    assert!(ctx.softmax_block(&x,f32::NAN).is_err());
 }

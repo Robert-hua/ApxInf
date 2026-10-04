@@ -415,6 +415,27 @@ impl Context {
         let op = self.prepare(5, &[x.len() / width, width], &[scale], &[x], &y)?;
         Ok((y, op))
     }
+    /// Independent block-reduction provider for last-axis LayerNorm.
+    /// Legacy `norm` dispatch and kernels are not changed by this opt-in API.
+    pub fn layer_norm_block(
+        &self, x: &Tensor, w: &Tensor, b: &Tensor, eps: f32,
+    ) -> Result<(Tensor, Operation)> {
+        let width = *x.shape.last().unwrap();
+        if w.shape != [width] || b.shape != [width] || !eps.is_finite() || eps <= 0. {
+            return Err("block layer normalization shape/epsilon mismatch".into());
+        }
+        let y = self.zeros(&x.shape)?;
+        let op = self.prepare(13, &[x.len() / width, width], &[eps], &[x, w, b], &y)?;
+        Ok((y, op))
+    }
+    /// Independent, capture-safe last-axis Softmax with synchronized broadcasts.
+    pub fn softmax_block(&self, x: &Tensor, scale: f32) -> Result<(Tensor, Operation)> {
+        if !scale.is_finite() { return Err("softmax scale must be finite".into()); }
+        let width = *x.shape.last().unwrap();
+        let y = self.zeros(&x.shape)?;
+        let op = self.prepare(14, &[x.len() / width, width], &[scale], &[x], &y)?;
+        Ok((y, op))
+    }
     pub fn permute(&self, x: &Tensor, axes: &[usize]) -> Result<(Tensor, Operation)> {
         let rank = x.shape.len();
         if rank > 4 || rank != axes.len() {

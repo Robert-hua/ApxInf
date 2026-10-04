@@ -193,3 +193,14 @@ leaving transposed and vision convolutions on cuDNN. Other families are unchange
 The real-shape f64/Graph test covers both library and explicit GEMM providers;
 a separate test rejects unsupported precisions. This extends prepared tensor ops,
 not the unified recipe registry.
+
+`Context::layer_norm_block` / `softmax_block` are explicit independent row
+reduction providers (kinds 13/14). They launch separate symbols from
+`block_reductions.cuh`; there is no environment switch, shared-kernel body or
+implicit redirection of legacy kinds 4/5. LayerNorm admits one last-axis affine
+vector and positive finite epsilon; Softmax requires finite scale. The two
+reductions synchronize after consuming the first broadcast before reusing shared
+storage. Kart selects these APIs; existing ACT, Diffusion and PI0.5 model code
+is unchanged. Legacy primitives are exactly restored to `fd47565^`, including
+the previously diagnosed multi-warp race: do not claim that path is repaired.
+Focused f64/repeated/Graph tests qualify only the new provider.

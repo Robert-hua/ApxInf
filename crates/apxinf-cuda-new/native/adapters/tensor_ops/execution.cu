@@ -1,5 +1,6 @@
 #include "apxinf_cuda/tensor_ops.h"
 #include "../../kernels/tensor_ops/primitives.cuh"
+#include "../../kernels/tensor_ops/block_reductions.cuh"
 #include <cudnn.h>
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -101,6 +102,8 @@ void enqueue(Execution&e){auto&p=e.s.p;auto&f=e.s.f;auto st=e.ctx->stream;float 
   ck(cublasSgemmStridedBatched(e.ctx->bl,p[4]?CUBLAS_OP_T:CUBLAS_OP_N,CUBLAS_OP_N,p[2],p[1],p[3],&f[0],e.b,p[4]?p[3]:p[2],(long long)p[2]*p[3],e.a,p[3],(long long)p[1]*p[3],&zero,e.y,p[2],(long long)p[1]*p[2],p[0]));break;
  case 11:apx_axpby<<<(p[0]+255)/256,256,0,st>>>(p[0],e.a,e.b,e.c,e.y,f[0],f[1],f[2],f[3]);break;
  case 12:apx_batch_norm<<<(p[0]+255)/256,256,0,st>>>(p[0],p[1],p[2],e.a,e.b,e.y,f[0],p[3],p[4]);break;
+ case 13:apx_block_layer_norm<<<p[0],256,0,st>>>(p[0],p[1],p[1],1,e.a,e.b,e.c,e.y,f[0]);break;
+ case 14:apx_block_softmax<<<p[0],256,0,st>>>(p[0],p[1],e.a,e.y,f[0]);break;
  default:throw std::runtime_error("unsupported tensor semantic");
  }ck(cudaPeekAtLastError());
 }

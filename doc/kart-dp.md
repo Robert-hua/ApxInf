@@ -17,6 +17,12 @@ No Torch/TensorRT runtime is used by this family.
 The forward temporal convolutions explicitly select prepared FP32 im2col/GEMM;
 vision and transposed convolutions retain cuDNN. This family-local choice needs
 no process-wide provider environment override and does not change other models.
+DINO LayerNorm and attention Softmax explicitly use `layer_norm_block` and
+`softmax_block` (operation kinds 13/14, `block_reductions.cuh`). These independent
+kernels retain synchronized broadcast/reduction reuse; legacy kinds 4/5 and
+`primitives.cuh` are restored to their pre-Kart-fix implementation. The old
+multi-warp race remains a documented legacy limitation, not a claimed fix for
+other families. GroupNorm and other unchanged primitives retain existing paths.
 Offline export/reference tools remain in the parent ApexForge evaluation directory and require the original
 training source. A training `.pt` must first be exported; ordinary and EMA
 weights are different candidates and the choice is explicit in the export.

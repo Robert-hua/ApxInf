@@ -44,7 +44,11 @@ impl Builder<'_> {
         } else {
             (384, 1, 1e-6)
         };
-        self.take(self.ctx.norm(x, &w, &b, width, spatial, eps))
+        if groups.is_some() {
+            self.take(self.ctx.norm(x, &w, &b, width, spatial, eps))
+        } else {
+            self.take(self.ctx.layer_norm_block(x, &w, &b, eps))
+        }
     }
     fn conv(
         &mut self,
@@ -115,7 +119,7 @@ impl Builder<'_> {
                 );
             }
             let scores = self.take(ctx.bmm(&pieces[0], &pieces[1], true, 0.125))?;
-            let probs = self.take(ctx.softmax(&scores, 1.))?;
+            let probs = self.take(ctx.softmax_block(&scores, 1.))?;
             let y = self
                 .take(ctx.bmm(&probs, &pieces[2], false, 1.))?
                 .reshape(&[4, 6, 337, 64])?;

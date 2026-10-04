@@ -474,6 +474,7 @@ fn build_tensor_ops() {
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed=native/include/apxinf_cuda/tensor_ops.h");
     println!("cargo:rerun-if-changed=native/kernels/tensor_ops/primitives.cuh");
+    println!("cargo:rerun-if-changed=native/kernels/tensor_ops/block_reductions.cuh");
     let object = out.join("tensor_ops.o");
     run(Command::new(format!("{cuda}/bin/nvcc")).args(["-c", source, "-O3", "-std=c++17", "-Xcompiler", "-fPIC", "-I", "native/include", "-arch"]).arg(arch).arg("-o").arg(&object), "compile tensor operators");
     run(Command::new("ar").arg("rcs").arg(out.join("libapxinf_tensor_ops.a")).arg(object), "archive tensor operators");
