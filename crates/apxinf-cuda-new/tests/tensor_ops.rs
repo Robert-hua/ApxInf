@@ -289,3 +289,35 @@ fn exact_gelu_matches_erf_golden_and_rebinds_graph_input() {
     x.write(&[0.;9]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&[0.;9],0.);
     close(&old,&golden,3e-7);
 }
+
+#[test]
+fn multi_warp_reductions_preserve_broadcast_before_reusing_shared_memory() {
+    let ctx=Context::new(0).unwrap();
+    for width in [337usize,384] {
+        let rows=32;
+        let values=(0..rows*width).map(|i|((i*13%101) as f32-50.)*0.125+(i/width) as f32).collect::<Vec<_>>();
+        let x=ctx.tensor(&[rows,width],&values).unwrap();
+        let w=ctx.tensor(&[width],&vec![1.;width]).unwrap();
+        let b=ctx.tensor(&[width],&vec![0.;width]).unwrap();
+        let (norm,nop)=ctx.norm(&x,&w,&b,width,1,1e-6).unwrap();
+        let (prob,sop)=ctx.softmax(&x,1.).unwrap();
+        let mut norms=Vec::new();let mut probs=Vec::new();
+        for row in values.chunks_exact(width) {
+            let mean=row.iter().map(|&v|v as f64).sum::<f64>()/width as f64;
+            let var=row.iter().map(|&v|(v as f64-mean).powi(2)).sum::<f64>()/width as f64;
+            let max=row.iter().copied().fold(f32::NEG_INFINITY,f32::max) as f64;
+            let sum=row.iter().map(|&v|(v as f64-max).exp()).sum::<f64>();
+            norms.extend(row.iter().map(|&v|((v as f64-mean)/(var+1e-6).sqrt()) as f32));
+            probs.extend(row.iter().map(|&v|((v as f64-max).exp()/sum) as f32));
+        }
+        let ops=[nop,sop];
+        for _ in 0..64 {
+            run(&ops);
+            close(&norm.read().unwrap(),&norms,2e-6);
+            close(&prob.read().unwrap(),&probs,2e-7);
+        }
+        let graph=ctx.capture(&ops).unwrap();graph.replay().unwrap();
+        close(&norm.read().unwrap(),&norms,2e-6);
+        close(&prob.read().unwrap(),&probs,2e-7);
+    }
+}
