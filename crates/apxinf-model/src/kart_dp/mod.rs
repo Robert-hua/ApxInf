@@ -21,10 +21,10 @@ fn load(
         || options.assets.keys().any(|k| k != "vision_features")
         || options.config.is_some()
         || options.synthetic.is_some()
-        || !matches!(options.model_variant.as_deref(), None | Some("f32" | "fp16" | "fp8_policy"))
+        || !matches!(options.model_variant.as_deref(), None | Some("f32" | "fp16" | "fp8_policy" | "f32_gemm" | "f32_compensated" | "f32_fast"))
     {
         return Err(Error::Other(
-            "kart_dp supports exported checkpoint config and f32/fp16/fp8_policy only".into(),
+            "kart_dp supports exported checkpoint config and f32/fp16/fp8_policy/f32_gemm/f32_compensated/f32_fast only".into(),
         ));
     }
     let external_vision = if let Some(contract) = options.assets.get("vision_features") {
@@ -40,7 +40,7 @@ fn load(
     };
     let ctx = apxinf_cuda_next::tensor_ops::Context::new(index).map_err(Error::Other)?;
     let mut weights = weights::Weights::load(path, &ctx).map_err(Error::Other)?;
-    let variant = match options.model_variant.as_deref() {Some("fp16")=>"fp16",Some("fp8_policy")=>"fp8_policy",_=>"f32"};
+    let variant = match options.model_variant.as_deref() {Some("f32_fast")=>"f32_fast",Some("f32_gemm")=>"f32_gemm",Some("f32_compensated")=>"f32_compensated",Some("fp16")=>"fp16",Some("fp8_policy")=>"fp8_policy",_=>"f32"};
     let model = model::Model::build(ctx, &mut weights, variant, external_vision).map_err(Error::Other)?;
     Ok(LoadedModel::Vla(Box::new(model_runner::ModelRunner::new(
         model,

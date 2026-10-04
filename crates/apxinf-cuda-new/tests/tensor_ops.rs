@@ -400,3 +400,114 @@ fn isolated_fp8_linear_pads_irregular_shapes_and_updates_graph_scales() {
     x.write(&vec![0.;m*k]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&[1.,2.,3.,1.,2.,3.],0.);
     x.write(&xv).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,0.);
 }
+
+#[test]
+fn compensated_linear_and_temporal_convolutions_match_f64_reference() {
+    let ctx=Context::new(0).unwrap();
+    let rounded=|x:f32|x as f64;
+    let xv=(0..15).map(|i|(i as f32-7.)/13.).collect::<Vec<_>>();
+    let wv=(0..20).map(|i|(i as f32-9.)/17.).collect::<Vec<_>>();
+    let x=ctx.tensor(&[3,5],&xv).unwrap();let w=ctx.tensor(&[4,5],&wv).unwrap();
+    let bias=ctx.tensor(&[4],&[0.1,-0.2,0.3,-0.4]).unwrap();
+    let (y,op)=ctx.linear_f16x3(&x,&w,Some(&bias)).unwrap();op.run().unwrap();
+    let mut gold=vec![0.;12];
+    for i in 0..3 {for j in 0..4 {gold[i*4+j]=((0..5).map(|k|rounded(xv[i*5+k])*rounded(wv[j*5+k])).sum::<f64>()+[0.1f32,-0.2,0.3,-0.4][j] as f64) as f32;}}
+    close(&y.read().unwrap(),&gold,1e-6);
+    for transpose in [false,true] {
+        let (batch,ci,co,length,kernel,stride,pad)=(2,3,4,7,4,2,1);
+        let out=if transpose{(length-1)*stride+kernel-2*pad}else{(length+2*pad-kernel)/stride+1};
+        let xv=(0..batch*ci*length).map(|i|(i as f32%19.-9.)/13.).collect::<Vec<_>>();
+        let wv=(0..ci*co*kernel).map(|i|(i as f32%13.-6.)/17.).collect::<Vec<_>>();
+        let x=ctx.zeros(&[batch,ci,length]).unwrap();x.write(&xv).unwrap();
+        let w=ctx.tensor(&[if transpose{ci}else{co},if transpose{co}else{ci},kernel],&wv).unwrap();
+        let b=ctx.tensor(&[co],&vec![0.125;co]).unwrap();
+        for pure in [false,true] {
+        if pure && !transpose {continue;}
+        let (y,op)=if pure {ctx.conv_transpose1d_gemm(&x,&w,Some(&b),stride,pad)} else {ctx.conv1d_f16x3(&x,&w,Some(&b),stride,pad,transpose)}.unwrap();
+        x.write(&xv).unwrap();
+        let mut gold=vec![0.;batch*co*out];
+        for ib in 0..batch {for oc in 0..co {for t in 0..out {
+            let mut sum=0.125f64;
+            for ic in 0..ci {for k in 0..kernel {
+                let pos=if transpose {let q=t as isize+pad as isize-k as isize;if q<0||q%stride as isize!=0{continue;}q/stride as isize}else{(t*stride+k) as isize-pad as isize};
+                if pos<0||pos>=length as isize{continue;}
+                let wi=if transpose{(ic*co+oc)*kernel+k}else{(oc*ci+ic)*kernel+k};
+                sum+=rounded(xv[(ib*ci+ic)*length+pos as usize])*rounded(wv[wi]);
+            }}gold[(ib*co+oc)*out+t]=sum as f32;
+        }}}
+        op.run().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+        let graph=ctx.capture(&[op]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+        x.write(&vec![0.;xv.len()]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.125;gold.len()],0.);
+        x.write(&xv).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+        }
+    }
+}
+
+#[test]
+fn fused_f32_attention_matches_f64_softmax_and_retains_graph() {
+    let ctx=Context::new(0).unwrap();let (batch,seq,heads,d)=(2,65,2,64);
+    let values=(0..batch*seq*3*heads*d).map(|i|((i*73%211)as f32-105.)/103.).collect::<Vec<_>>();
+    let qkv=ctx.zeros(&[batch,seq,3*heads*d]).unwrap();qkv.write(&values).unwrap();
+    let (y,op)=ctx.attention_qkv_f32(&qkv,heads).unwrap();
+    let mut gold=vec![0.;batch*seq*heads*d];
+    for b in 0..batch {for i in 0..seq {for h in 0..heads {
+        let at=|t:usize,part:usize,j:usize|values[((b*seq+t)*3*heads+part*heads+h)*d+j]as f64;
+        let mut scores=(0..seq).map(|t|(0..d).map(|j|at(i,0,j)*at(t,1,j)*0.125).sum::<f64>()).collect::<Vec<_>>();
+        let max=scores.iter().copied().fold(f64::NEG_INFINITY,f64::max);
+        for s in &mut scores {*s=(*s-max).exp();}let denom=scores.iter().sum::<f64>();
+        for j in 0..d {gold[((b*seq+i)*heads+h)*d+j]=(scores.iter().enumerate().map(|(t,&s)|s/denom*at(t,2,j)).sum::<f64>())as f32;}
+    }}}
+    op.run().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+    let graph=ctx.capture(&[op]).unwrap();drop(ctx);graph.replay().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+    qkv.write(&vec![0.;values.len()]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.;gold.len()],0.);
+    qkv.write(&values).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+}
+#[test]
+fn fast_row_norm_and_residual_match_independent_definitions() {
+    let ctx=Context::new(0).unwrap();
+    for width in [1usize,31,337,384,1024] {
+        let rows=7;let values=(0..rows*width).map(|i|((i*13%101)as f32-50.)*0.0137).collect::<Vec<_>>();
+        let x=ctx.zeros(&[rows,width]).unwrap();x.write(&values).unwrap();
+        let gamma=ctx.tensor(&[width],&vec![0.25;width]).unwrap();let beta=ctx.tensor(&[width],&vec![0.1;width]).unwrap();
+        let (r,rop)=ctx.scaled_residual(&x,&x,&gamma).unwrap();let(rn,nop)=ctx.layer_norm_warp(&r,&gamma,&beta,1e-6).unwrap();
+        let expected=values.iter().map(|v|v+v*0.25).collect::<Vec<_>>();let mut gold=Vec::new();
+        for row in expected.chunks_exact(width){let mean=row.iter().map(|&v|v as f64).sum::<f64>()/width as f64;let var=row.iter().map(|&v|(v as f64-mean).powi(2)).sum::<f64>()/width as f64;gold.extend(row.iter().map(|&v|((v as f64-mean)/(var+1e-6).sqrt()*0.25+0.1f32 as f64)as f32));}
+        let ops=[rop,nop];run(&ops);close(&r.read().unwrap(),&expected,0.);close(&rn.read().unwrap(),&gold,2e-6);
+        let graph=ctx.capture(&ops).unwrap();x.write(&vec![0.;values.len()]).unwrap();graph.replay().unwrap();close(&rn.read().unwrap(),&vec![0.1;values.len()],0.);
+    }
+}
+#[test]
+fn batched_rgb_edge_padding_matches_cpu_division_order() {
+    let ctx=Context::new(0).unwrap();let y=ctx.zeros(&[2,3,5,13]).unwrap();let proc=ctx.rgb_batch_processor(&y,7).unwrap();
+    let x=(0..2*5*7*3).map(|i|(i*37%256)as u8).collect::<Vec<_>>();let mean=[0.485,0.456,0.406];let std=[0.229,0.224,0.225];let mut gold=Vec::new();
+    for b in 0..2 {for c in 0..3 {for h in 0..5 {for w in 0..13 {let col=(w as isize-3).clamp(0,6)as usize;gold.push(((x[((b*5+h)*7+col)*3+c]as f32/255.)-mean[c])/std[c]);}}}}
+    proc.write(&x,mean,std).unwrap();close(&y.read().unwrap(),&gold,0.);
+    proc.write(&vec![0;x.len()],mean,std).unwrap();
+    proc.write(&x,mean,std).unwrap();close(&y.read().unwrap(),&gold,0.);
+    assert!(proc.write(&x[..x.len()-1],mean,std).is_err());assert!(proc.write(&x,mean,[0.;3]).is_err());
+}
+
+#[test]
+fn norm_compensated_linear_matches_f64_and_refreshes_graph_inputs() {
+    let ctx=Context::new(0).unwrap();
+    for k in [31usize,384,1024] {
+        let(m,n)=(5,7);let eps=1e-6f32;
+        let values=(0..m*k).map(|i|((i*13%101)as f32-50.)*0.0137).collect::<Vec<_>>();
+        let weights=(0..n*k).map(|i|((i*37%79)as f32-39.)*0.0031).collect::<Vec<_>>();
+        let mut pv=vec![0.125;n];pv.extend(vec![0.75;k]);pv.extend(vec![0.03;k]);
+        let x=ctx.zeros(&[m,k]).unwrap();x.write(&values).unwrap();
+        let w=ctx.tensor(&[n,k],&weights).unwrap();let params=ctx.tensor(&[n+2*k],&pv).unwrap();
+        let (y,op)=ctx.linear_norm_f16x3(&x,&w,&params,eps).unwrap();
+        let reference=|v:&[f32]|{let mut out=Vec::new();for row in v.chunks_exact(k){
+            let mean=row.iter().map(|&x|x as f64).sum::<f64>()/k as f64;
+            let var=row.iter().map(|&x|(x as f64-mean).powi(2)).sum::<f64>()/k as f64;
+            for j in 0..n {out.push((0.125+(0..k).map(|c|((row[c]as f64-mean)/(var+eps as f64).sqrt()*0.75+0.03f32 as f64)*weights[j*k+c]as f64).sum::<f64>())as f32);}
+        }out};
+        op.run().unwrap();close(&y.read().unwrap(),&reference(&values),5e-6);
+        let graph=ctx.capture(&[op]).unwrap();
+        for v in [vec![0.;m*k],values] {x.write(&v).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&reference(&v),5e-6);}
+        let mutable=ctx.zeros(&[n+2*k]).unwrap();assert!(ctx.linear_norm_f16x3(&x,&w,&mutable,eps).is_err());
+        assert!(ctx.linear_norm_f16x3(&x,&w,&params,f32::NAN).is_err());
+    }
+    let large=ctx.zeros(&[65536,1,192]).unwrap();assert!(ctx.attention_qkv_f32(&large,1).is_err());
+}

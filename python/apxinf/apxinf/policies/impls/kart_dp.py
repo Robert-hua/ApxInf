@@ -15,8 +15,8 @@ class KartDpPolicy:
         config = json.loads((root / "config.json").read_text())
         if config.get("model_type") != "kart_dp" or config.get("format_version") != 1:
             raise ValueError("Expected exported kart_dp format_version 1")
-        if model_variant not in ("f32", "fp16", "fp8_policy"):
-            raise ValueError("kart_dp supports f32 or experimental fp16/fp8_policy")
+        if model_variant not in ("f32", "fp16", "fp8_policy", "f32_gemm", "f32_compensated", "f32_fast"):
+            raise ValueError("kart_dp supports f32 or experimental fp16/fp8_policy/f32_gemm/f32_compensated")
         adapter = json.loads((root / "adapter.json").read_text())
         vision=None
         try:
@@ -53,6 +53,7 @@ class KartDpPolicy:
         self.std = np.asarray(adapter["image_std"],np.float32).reshape(1,3,1,1)
         if not np.isfinite(self.mean).all() or not np.isfinite(self.std).all() or (self.std<=0).any():
             raise ValueError("Invalid image normalization")
+        self._gpu_rgb = model_variant in ("f32_fast",) and vision is None
         self.metadata = {"model_type":"kart_dp", "model_variant":model_variant, "action_horizon":24,
                          "prediction_horizon":24, "action_dim":3, "state_dim":62,
                          "n_obs_steps":4, "image_shape":[224,288,3],
@@ -73,17 +74,21 @@ class KartDpPolicy:
             raise ValueError("kart_dp requires finite oldest-to-newest state [4,62]")
         if image.shape[1:3]==(240,320):
             image=image[:,8:232,16:304]
-        image=image.transpose(0,3,1,2).astype(np.float32)/np.float32(255)
-        if self.vision is not None:
-            image=self.vision.infer(image[None])
-        else:
-            image=np.pad(image,((0,0),(0,0),(0,0),(3,3)),mode="edge")
-            image=np.ascontiguousarray((image-self.mean)/self.std)
+        if not self._gpu_rgb:
+            image=image.transpose(0,3,1,2).astype(np.float32)/np.float32(255)
+            if self.vision is not None:
+                image=self.vision.infer(image[None])
+            else:
+                image=np.pad(image,((0,0),(0,0),(0,0),(3,3)),mode="edge")
+                image=np.ascontiguousarray((image-self.mean)/self.std)
         state=np.ascontiguousarray(((state-self.state_mean)/self.state_std).reshape(1,248))
         noise=self.noise if noise is None else np.asarray(noise,dtype=np.float32)
         if noise.shape!=(1,24,3) or not np.isfinite(noise).all():
             raise ValueError("kart_dp noise must be finite [1,24,3]")
-        prediction=np.asarray(self.model_runner.infer_tensors(image,state,np.ascontiguousarray(noise)))
+        if self._gpu_rgb:
+            prediction=np.asarray(self.model_runner.infer_pixels(np.ascontiguousarray(image),state,self.mean.reshape(3).tolist(),self.std.reshape(3).tolist(),np.ascontiguousarray(noise)))
+        else:
+            prediction=np.asarray(self.model_runner.infer_tensors(image,state,np.ascontiguousarray(noise)))
         if prediction.shape!=(24,3) or not np.isfinite(prediction).all():
             raise ValueError("Invalid kart_dp native output")
         prediction=prediction.copy()

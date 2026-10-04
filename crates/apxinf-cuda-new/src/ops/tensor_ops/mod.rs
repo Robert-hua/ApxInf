@@ -15,6 +15,7 @@ struct Spec {
     f: [f32; 4],
 }
 unsafe extern "C" {
+    fn apx_tensor_rgb_batch(c:*mut c_void,batch:i32,height:i32,width:i32,padded:i32,x:*const u8,y:*mut f32,mean:*const f32,std:*const f32)->i32;
     fn apx_tensor_error() -> *const std::ffi::c_char;
     fn apx_tensor_context_create(device: i32, out: *mut *mut c_void) -> i32;
     fn apx_tensor_math_mode(c: *mut c_void, tf32: i32) -> i32;
@@ -233,6 +234,19 @@ impl Context {
     pub fn linear_fp16(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
         self.linear_lowp(x,w,bias,15)
     }
+    /// Three FP16-rounded high/low products, FP32 accumulation/output; small-low
+    /// product omitted. Finite operands must fit FP16 range. Explicit opt-in.
+    pub fn linear_f16x3(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
+        self.linear_lowp(x,w,bias,19)
+    }
+    /// LayerNorm then compensated Linear; params=[linear bias, norm weight, norm bias].
+    /// Immutable F32 params and matrix, row width <=1024; no intermediate F32 norm tensor.
+    pub fn linear_norm_f16x3(&self,x:&Tensor,w:&Tensor,params:&Tensor,eps:f32)->Result<(Tensor,Operation)>{
+        if !w.immutable.get() || !params.immutable.get() || w.shape.len()!=2 || x.shape.last()!=Some(&w.shape[1]) || !eps.is_finite() || eps<=0. {return Err("norm linear contract mismatch".into());}
+        let(n,k)=(w.shape[0],w.shape[1]);if k>1024 || params.shape!=[n+2*k]{return Err("norm linear parameter shape mismatch".into());}
+        let m=x.len()/k;let mut shape=x.shape.clone();*shape.last_mut().unwrap()=n;let y=self.zeros(&shape)?;
+        let op=self.prepare(26,&[m,n,k],&[eps],&[x,w,params],&y)?;Ok((y,op))
+    }
     /// Experimental E4M3 per-tensor scaled Linear, FP32 accumulation/output.
     pub fn linear_fp8(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
         self.linear_lowp(x,w,bias,18)
@@ -250,6 +264,17 @@ impl Context {
     }
     /// Opt-in NCL forward/transposed Conv1d through prepared FP16 GEMM lowering.
     pub fn conv1d_fp16(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize, transpose: bool) -> Result<(Tensor, Operation)> {
+        self.conv1d_prepared(x,w,bias,stride,pad,transpose,if transpose{17}else{16})
+    }
+    /// Independent high/low three-product Conv1d; operands must fit FP16 range.
+    pub fn conv1d_f16x3(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize, transpose: bool) -> Result<(Tensor, Operation)> {
+        self.conv1d_prepared(x,w,bias,stride,pad,transpose,if transpose{21}else{20})
+    }
+    /// F32 transposed Conv1d with prepared weight packing and GEMM/col2im.
+    pub fn conv_transpose1d_gemm(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize) -> Result<(Tensor, Operation)> {
+        self.conv1d_prepared(x,w,bias,stride,pad,true,22)
+    }
+    fn conv1d_prepared(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize, transpose: bool, kind: i32) -> Result<(Tensor, Operation)> {
         if x.shape.len()!=3 || w.shape.len()!=3 || !w.immutable.get() || stride==0 {
             return Err("FP16 Conv1d shape/stride/immutable weights required".into());
         }
@@ -266,7 +291,7 @@ impl Context {
         };
         count(&[ci,co,kernel])?;count(&[ci,kernel,out])?;count(&[co,kernel,length])?;
         let y=self.zeros(&[batch,co,out])?;let mut args=vec![x,w];if let Some(b)=bias{args.push(b);}
-        let op=self.prepare(if transpose{17}else{16},&[batch,ci,length,co,kernel,out,stride,pad],&[],&args,&y)?;Ok((y,op))
+        let op=self.prepare(kind,&[batch,ci,length,co,kernel,out,stride,pad],&[],&args,&y)?;Ok((y,op))
     }
     pub fn conv2d(
         &self,
@@ -593,6 +618,29 @@ impl Context {
         )?;
         Ok((y, op))
     }
+    /// Explicit F32 row LayerNorm, widths 1..=1024, one warp per row.
+    pub fn layer_norm_warp(&self,x:&Tensor,w:&Tensor,b:&Tensor,eps:f32)->Result<(Tensor,Operation)> {
+        let width=*x.shape.last().ok_or("empty norm shape")?;
+        if width>1024 || w.shape!=[width] || b.shape!=[width] || !eps.is_finite() || eps<=0. {return Err("warp norm shape/epsilon mismatch".into());}
+        let y=self.zeros(&x.shape)?;let op=self.prepare(24,&[x.len()/width,width],&[eps],&[x,w,b],&y)?;Ok((y,op))
+    }
+    /// x + branch * per-last-axis gamma with separate FP32 multiply/add rounding.
+    pub fn scaled_residual(&self,x:&Tensor,branch:&Tensor,gamma:&Tensor)->Result<(Tensor,Operation)> {
+        let width=*x.shape.last().ok_or("empty residual shape")?;
+        if x.shape!=branch.shape || gamma.shape!=[width] {return Err("scaled residual shape mismatch".into());}
+        let y=self.zeros(&x.shape)?;let op=self.prepare(25,&[x.len(),width],&[],&[x,branch,gamma],&y)?;Ok((y,op))
+    }
+    /// F32 packed QKV [B,S,3*H*64] -> [B,S,H*64], scale 1/sqrt(64).
+    /// Unmasked self-attention, no dropout; high-accuracy three-TF32 products.
+    pub fn attention_qkv_f32(&self,qkv:&Tensor,heads:usize)->Result<(Tensor,Operation)> {
+        if heads==0 || qkv.shape.len()!=3 || heads.checked_mul(192)!=qkv.shape.last().copied() {
+            return Err("F32 fused attention requires packed QKV with head_dim=64".into());
+        }
+        let (batch,seq)=(qkv.shape[0],qkv.shape[1]);
+        if batch>65535 || heads>65535 {return Err("F32 attention CUDA grid exceeds limit".into());}
+        let y=self.zeros(&[batch,seq,heads*64])?;
+        let op=self.prepare(23,&[batch,seq,heads],&[],&[qkv],&y)?;Ok((y,op))
+    }
     pub fn bmm(
         &self,
         a: &Tensor,
@@ -792,5 +840,26 @@ impl RgbProcessor {
         if bytes.len()!=self.input.len() || mean.iter().any(|v|!v.is_finite()) || std.iter().any(|v|!v.is_finite()||*v<=0.) {return Err("invalid RGB input/normalization".into())}
         self.context.synchronize()?;self.input.copy_from_host(bytes)?;
         check(unsafe{apx_tensor_rgb_normalize(self.context.0.raw,(bytes.len()/3)as i32,self.input.ptr().cast(),self.output.buffer.ptr().cast(),mean.as_ptr(),std.as_ptr())})
+    }
+}
+
+/// Batched HWC RGB upload with symmetric horizontal edge padding and FP32 normalization.
+/// Separate prepared provider; existing single-image RGB behavior is unchanged.
+pub struct RgbBatchProcessor {input:CudaBuffer,output:Tensor,context:Context,width:usize}
+impl Context {
+    pub fn rgb_batch_processor(&self,output:&Tensor,width:usize)->Result<RgbBatchProcessor>{
+        if output.shape.len()!=4 || output.shape[1]!=3 || width==0 || width>output.shape[3]
+            || (output.shape[3]-width)%2!=0 || output.immutable.get() || !Rc::ptr_eq(&self.0,&output.context.0){
+            return Err("RGB batch requires mutable NCHW with symmetric horizontal padding".into());
+        }
+        let size=count(&[output.shape[0],output.shape[2],width,3])?;
+        Ok(RgbBatchProcessor{input:CudaBuffer::alloc_zeros(size,self.0.device)?,output:output.clone(),context:self.clone(),width})
+    }
+}
+impl RgbBatchProcessor {
+    pub fn write(&self,bytes:&[u8],mean:[f32;3],std:[f32;3])->Result<()>{
+        if bytes.len()!=self.input.len() || mean.iter().any(|v|!v.is_finite()) || std.iter().any(|v|!v.is_finite()||*v<=0.){return Err("RGB batch input/normalization mismatch".into());}
+        self.context.synchronize()?;self.input.copy_from_host(bytes)?;let s=&self.output.shape;
+        check(unsafe{apx_tensor_rgb_batch(self.context.0.raw,s[0]as i32,s[2]as i32,self.width as i32,s[3]as i32,self.input.ptr().cast(),self.output.buffer.ptr().cast(),mean.as_ptr(),std.as_ptr())})
     }
 }

@@ -220,3 +220,40 @@ performs real FP8 GEMM with FP32 accumulation/output. Alignment padding,
 activation quantization, scales, unpadding and FP32 bias are part of execution.
 The padded activation/output scratch is bounded to 64 MiB and Lt workspace to
 4 MiB. This is an experimental operator, not evidence of model quality.
+
+
+### Opt-in high-accuracy prepared tensor operators
+
+Kinds 19/20/21 expose `linear_f16x3` / `conv1d_f16x3`. Immutable weights are
+split into FP16 high plus a residual scaled by 1024 at preparation; activations
+are split every enqueue. Three products HH + (HL + LH)/1024 accumulate into
+FP32 (LL omitted). This is a bounded approximate provider: finite operands must
+fit FP16, and downstream parity must be checked. Scratch is capped at 64 MiB
+per prepared op, excluding immutable weights and the optional 4 MiB Lt bias
+workspace. Temporal lowering is padded to 16 positions and uses row-major
+K-contiguous matrices. Kind 22 / `conv_transpose1d_gemm` retains strict FP32.
+The adapter is `native/adapters/tensor_ops/compensated.cuh`; CUDA kernels live
+under `native/kernels/tensor_ops/compensated.cuh`.
+
+Kind 23 / `attention_qkv_f32` accepts [B,S,3*H*64] F32 packed QKV, unmasked
+self-attention and scale 1/8; output is [B,S,H*64]. The pinned BSD CUTLASS 3.4.1
+example-41 provider uses Sm80 64x64 tiling with three TF32 products. Tested on
+Thor sm110 only; admission is not a cross-device performance claim. Preparation
+sets dynamic shared-memory attributes outside capture. Kind 24 provides warp
+LayerNorm for widths <=1024; kind 25 provides separately rounded scaled
+residual; kind 26 combines that norm with the kind-19 input split and requires
+immutable [linear bias, norm weight, norm bias] parameters. Packed attention
+rejects batch/head CUDA grid dimensions above 65535.
+
+`RgbBatchProcessor` independently owns uint8 input and FP32 output buffers,
+converts BHWC to BCHW with symmetric edge padding, and preserves division and
+subtraction rounding. Every write copies new RGB data on the owning stream;
+this is not zero-copy or cached vision. All resources belong to the prepared
+operation/context/graph lifetime; capture performs no packing or allocation.
+Legacy kinds 0-18 and provider selection remain unchanged. These operators are
+outside the recipe registry, with no persistent tactic-cache claim.
+
+Tests compare Linear/temporal convolutions/attention/norm against independent
+F64 definitions, cover odd shapes and graph input updates, and verify RGB
+normalization exactly against CPU division order. Model-level gates remain
+mandatory: compensated operators alone do not establish policy quality.

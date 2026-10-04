@@ -476,9 +476,16 @@ fn build_tensor_ops() {
     println!("cargo:rerun-if-changed=native/kernels/tensor_ops/primitives.cuh");
     println!("cargo:rerun-if-changed=native/kernels/tensor_ops/block_reductions.cuh");
     println!("cargo:rerun-if-changed=native/adapters/tensor_ops/low_precision.cuh");
+    println!("cargo:rerun-if-changed=native/adapters/tensor_ops/compensated.cuh");
     let object = out.join("tensor_ops.o");
-    run(Command::new(format!("{cuda}/bin/nvcc")).args(["-c", source, "-O3", "-std=c++17", "-Xcompiler", "-fPIC", "-I", "native/include", "-arch"]).arg(arch).arg("-o").arg(&object), "compile tensor operators");
-    run(Command::new("ar").arg("rcs").arg(out.join("libapxinf_tensor_ops.a")).arg(object), "archive tensor operators");
+    run(Command::new(format!("{cuda}/bin/nvcc")).args(["-c", source, "-O3", "-std=c++17", "-Xcompiler", "-fPIC", "-I", "native/include", "-arch"]).arg(&arch).arg("-o").arg(&object), "compile tensor operators");
+    println!("cargo:rerun-if-changed=native/kernels/fmha_f32");
+    println!("cargo:rerun-if-changed=native/kernels/tensor_ops/fast_f32.cuh");
+    println!("cargo:rerun-if-changed=native/kernels/tensor_ops/compensated.cuh");
+    rerun_tree(Path::new("native/kernels/cutlass/include"));
+    let fmha = out.join("fmha_f32.o");
+    run(Command::new(format!("{cuda}/bin/nvcc")).args(["-c", "native/kernels/fmha_f32/launch.cu", "-O3", "-std=c++17", "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-I", "native/kernels/cutlass/include", "-arch"]).arg(&arch).arg("-o").arg(&fmha), "compile F32 fused attention");
+    run(Command::new("ar").arg("rcs").arg(out.join("libapxinf_tensor_ops.a")).args([object,fmha]), "archive tensor operators");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-search=native={cuda}/lib64");
     for lib in ["static=apxinf_tensor_ops", "cudnn", "cublas", "cublasLt", "cudart", "stdc++"] {

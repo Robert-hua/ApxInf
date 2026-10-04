@@ -13,7 +13,8 @@ The maintained CUDA path is in `crates/apxinf-model/src/kart_dp/`:
 `model` owns DINO, pooling, conditioning, U-Net and DDIM math;
 `model_runner` owns buffers, eager execution, graph capture and tensor binding.
 `policies/impls/kart_dp.py` owns observation preprocessing and action clipping.
-No Torch/TensorRT runtime is used by this family.
+The native path has no Torch/TensorRT runtime; an explicit optional TensorRT
+vision path is documented below.
 The forward temporal convolutions explicitly select prepared FP32 im2col/GEMM;
 vision and transposed convolutions retain cuDNN. This family-local choice needs
 no process-wide provider environment override and does not change other models.
@@ -82,3 +83,31 @@ as all-native, zero-copy or a single whole-model graph. TensorRT/CUDA Python
 bindings are optional; loading normal `kart_dp` has no TensorRT dependency.
 Parent ApexForge evaluation tools build engines on the target host and report
 actual layer precision, FP32-reference action error and complete-call latency.
+
+## High-accuracy native development variants
+
+`f32_gemm` replaces only temporal transposed convolutions with prepared strict
+F32 GEMM/gather. `f32_compensated` additionally selects independently prepared
+FP16 high/low three-product Linear and temporal Conv1d providers (FP32 output,
+accumulation and bias); one-row Linears remain strict F32. These are compensated
+approximations, not bitwise FP32 and not ordinary FP16 inference.
+
+`f32_fast` adds packed F32 fused attention from pinned CUTLASS example 41
+(TF32 three-product arithmetic, head dim 64), independent warp LayerNorm,
+LayerNorm-to-Linear splitting, and scaled residual kernels. GELU retains the
+original implementation. It prepares immutable timestep embeddings once and
+computes all ten per-step FiLM projections as batches once per new observation.
+FiLM inputs still depend on the current observation. Fusion (state/vision
+projection) executes once, followed by all ten DDIM U-Net/sampling iterations.
+DDPM training does not make this inference loop DDPM.
+
+With native vision, `f32_fast` uploads four RGB uint8 frames each call and
+normalizes/edge-pads on the GPU through an independently owned input buffer.
+The FP32 input seam remains available. No historical image/feature cache is
+used: all four frames and the entire vision graph execute every request.
+The original `f32` default and existing families retain their provider choices.
+
+Target-device 64-window development checks and replay pass for the current
+candidate; this is not full validation, a 10 ms guarantee, or robot acceptance.
+The parent report `reports/thor/kart-dp-epoch200/native-fast/README.md` records
+exact binaries, timing boundaries, rejected variants and pending acceptance.

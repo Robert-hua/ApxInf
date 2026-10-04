@@ -29,7 +29,7 @@ impl VlaRuntime for ModelRunner {
             num_views: 1,
             image_size: 0,
             patch_size: 0,
-            accepts_rgb_u8: false,
+            accepts_rgb_u8: self.model.rgb.is_some(),
         }
     }
     fn tensor_profile(&self) -> Option<TensorProfile> {
@@ -46,31 +46,28 @@ impl VlaRuntime for ModelRunner {
             .graph
             .try_borrow_mut()
             .map_err(|_| Error::Other("kart_dp busy".into()))?;
-        let ImageTensor::Normalized(image) = r.image else {
-            return Err(Error::Other(
-                "kart_dp requires canonical float tensor image".into(),
-            ));
-        };
         let Some(noise) = r.noise else {
             return Err(Error::Other(
                 "kart_dp requires explicit initial noise".into(),
             ));
         };
-        if image.shape != self.model.image.shape()
-            || r.state.shape != [1, 248]
-            || noise.shape != [1, 24, 3]
-            || image
-                .values
-                .iter()
-                .chain(r.state.values)
-                .chain(noise.values)
-                .any(|v| !v.is_finite())
-        {
-            return Err(Error::Other(
-                "kart_dp tensor profile mismatch or nonfinite input".into(),
-            ));
+        if r.state.shape != [1,248] || noise.shape != [1,24,3]
+            || r.state.values.iter().chain(noise.values).any(|v|!v.is_finite()) {
+            return Err(Error::Other("kart_dp state/noise profile mismatch".into()));
         }
-        self.model.image.write(image.values).map_err(Error::Other)?;
+        match r.image {
+            ImageTensor::Normalized(image)=>{
+                if image.shape!=self.model.image.shape() || image.values.iter().any(|v|!v.is_finite()) {
+                    return Err(Error::Other("kart_dp float image profile mismatch".into()));
+                }
+                self.model.image.write(image.values).map_err(Error::Other)?;
+            }
+            ImageTensor::RgbU8{shape,values,mean,std}=>{
+                if shape!=[4,224,288,3] {return Err(Error::Other("kart_dp RGB batch shape mismatch".into()));}
+                self.model.rgb.as_ref().ok_or_else(||Error::Other("RGB upload requires native f32_fast".into()))?
+                    .write(values,mean,std).map_err(Error::Other)?;
+            }
+        }
         self.model
             .state
             .write(r.state.values)

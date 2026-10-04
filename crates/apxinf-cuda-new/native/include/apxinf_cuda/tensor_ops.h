@@ -6,6 +6,11 @@
 // Kinds 13/14: opt-in block LayerNorm/Softmax; legacy kinds 4/5 are unchanged.
 // Kinds 15/16/17: isolated FP16 Linear/Conv1d/ConvTranspose1d (F32 outputs).
 // Kind 18: isolated dynamically scaled E4M3 Linear (F32 accumulation/output).
+// Kinds 19/20/21: FP16 high/low three-product Linear/Conv1d/ConvTranspose1d.
+// Kind 22: strict F32 GEMM ConvTranspose1d. Immutable weights, prepared scratch.
+// Kind 23: packed F32 QKV attention [B,S,3*H*64], scale 1/8, no mask.
+// Kind 24: warp LayerNorm (width <=1024); kind 25: scaled residual.
+// Kind 26: LayerNorm + kind 19; c=[linear bias N, norm weight K, norm bias K].
 // Zero-initialized existing callers retain their original behavior.
 struct apx_tensor_spec { int32_t kind; int32_t p[24]; float f[4]; };
 extern "C" {
@@ -19,6 +24,7 @@ int apx_tensor_prepare(void* context, const apx_tensor_spec* spec, const float* 
 int apx_tensor_enqueue(void* execution);
 int apx_tensor_tune(void* execution);
 int apx_tensor_rgb_normalize(void* context,int pixels,const unsigned char* x,float* y,const float* mean,const float* std);
+int apx_tensor_rgb_batch(void* context,int batch,int height,int width,int padded,const unsigned char* x,float* y,const float* mean,const float* std);
 void apx_tensor_destroy(void* execution);
 int apx_tensor_capture_begin(void* context);
 int apx_tensor_capture_end(void* context, void** graph);

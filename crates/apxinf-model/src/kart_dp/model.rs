@@ -5,6 +5,7 @@ pub(super) struct Model {
     pub variant: &'static str,
     pub ctx: Context,
     pub image: Tensor,
+    pub rgb: Option<apxinf_cuda_next::tensor_ops::RgbBatchProcessor>,
     pub state: Tensor,
     pub noise: Tensor,
     pub output: Tensor,
@@ -13,6 +14,11 @@ pub(super) struct Model {
 }
 struct Builder<'a> {
     fp16: bool,
+    compensated: bool,
+    fast: bool,
+    step: usize,
+    films: std::collections::HashMap<String,Tensor>,
+    transpose_gemm: bool,
     fp8_policy: bool,
     ctx: Context,
     w: &'a mut Weights,
@@ -31,9 +37,18 @@ impl Builder<'_> {
     fn linear(&mut self, x: &Tensor, n: &str) -> Result<Tensor> {
         let w = self.w.get(&format!("{n}.weight"))?;
         let b = self.w.get(&format!("{n}.bias"))?;
-        if self.fp8_policy && !n.starts_with("vision.") { self.take(self.ctx.linear_fp8(x, &w, Some(&b))) }
+        if self.compensated && x.len()/x.shape()[x.shape().len()-1]>1 { self.take(self.ctx.linear_f16x3(x, &w, Some(&b))) }
+        else if self.fp8_policy && !n.starts_with("vision.") { self.take(self.ctx.linear_fp8(x, &w, Some(&b))) }
         else if self.fp16 { self.take(self.ctx.linear_fp16(x, &w, Some(&b))) }
         else { self.take(self.ctx.linear(x, &w, Some(&b))) }
+    }
+    fn norm_linear(&mut self,x:&Tensor,norm:&str,linear:&str)->Result<Tensor>{
+        let w=self.w.get(&format!("{linear}.weight"))?;
+        let mut params=self.w.values(&format!("{linear}.bias"))?;
+        params.extend(self.w.values(&format!("{norm}.weight"))?);
+        params.extend(self.w.values(&format!("{norm}.bias"))?);
+        let params=self.ctx.tensor(&[params.len()],&params)?;
+        self.take(self.ctx.linear_norm_f16x3(x,&w,&params,1e-6))
     }
     fn act(&mut self, x: &Tensor, a: Activation) -> Result<Tensor> {
         self.take(self.ctx.activation(x, a))
@@ -52,7 +67,7 @@ impl Builder<'_> {
         if groups.is_some() {
             self.take(self.ctx.norm(x, &w, &b, width, spatial, eps))
         } else {
-            self.take(self.ctx.layer_norm_block(x, &w, &b, eps))
+            if self.fast {self.take(self.ctx.layer_norm_warp(x,&w,&b,eps))} else {self.take(self.ctx.layer_norm_block(x, &w, &b, eps))}
         }
     }
     fn conv(
@@ -76,6 +91,11 @@ impl Builder<'_> {
         transpose: bool,
     ) -> Result<Tensor> {
         let w = self.w.get(&format!("{n}.weight"))?;
+        if self.compensated || (self.transpose_gemm && transpose) {
+            let bias = self.w.get(&format!("{n}.bias"))?;
+            return if self.compensated { self.take(self.ctx.conv1d_f16x3(x, &w, Some(&bias), stride, pad, transpose)) }
+            else { self.take(self.ctx.conv_transpose1d_gemm(x, &w, Some(&bias), stride, pad)) };
+        }
         if self.fp16 {
             let bias = self.w.get(&format!("{n}.bias"))?;
             return self.take(self.ctx.conv1d_fp16(x, &w, Some(&bias), stride, pad, transpose));
@@ -115,8 +135,10 @@ impl Builder<'_> {
         let zeros = ctx.tensor(&[384], &vec![0.; 384])?;
         for i in 0..12 {
             let n = format!("{p}.blocks.{i}");
-            let y = self.norm(&x, &format!("{n}.norm1"), None)?;
-            let qkv = self.linear(&y, &format!("{n}.attn.qkv"))?;
+            let qkv=if self.fast {self.norm_linear(&x,&format!("{n}.norm1"),&format!("{n}.attn.qkv"))?} else {
+                let y=self.norm(&x,&format!("{n}.norm1"),None)?;self.linear(&y,&format!("{n}.attn.qkv"))?
+            };
+            let y = if self.fast { self.take(ctx.attention_qkv_f32(&qkv,6))? } else {
             let mut pieces = Vec::new();
             for j in 0..3 {
                 let q = self
@@ -135,17 +157,20 @@ impl Builder<'_> {
             let y = self
                 .take(ctx.permute(&y, &[0, 2, 1, 3]))?
                 .reshape(&[4, 337, 384])?;
+            y
+            };
             let y = self.linear(&y, &format!("{n}.attn.proj"))?;
             let gamma = self.w.get(&format!("{n}.ls1.gamma"))?;
-            let y = self.take(ctx.affine(&y, &gamma, &zeros, 1))?;
-            x = self.add(&x, &y)?;
-            let y = self.norm(&x, &format!("{n}.norm2"), None)?;
-            let y = self.linear(&y, &format!("{n}.mlp.fc1"))?;
+            if self.fast {x=self.take(ctx.scaled_residual(&x,&y,&gamma))?;}
+            else {let y=self.take(ctx.affine(&y,&gamma,&zeros,1))?;x=self.add(&x,&y)?;}
+            let y=if self.fast {self.norm_linear(&x,&format!("{n}.norm2"),&format!("{n}.mlp.fc1"))?} else {
+                let y=self.norm(&x,&format!("{n}.norm2"),None)?;self.linear(&y,&format!("{n}.mlp.fc1"))?
+            };
             let y = self.act(&y, Activation::Gelu)?;
             let y = self.linear(&y, &format!("{n}.mlp.fc2"))?;
             let gamma = self.w.get(&format!("{n}.ls2.gamma"))?;
-            let y = self.take(ctx.affine(&y, &gamma, &zeros, 1))?;
-            x = self.add(&x, &y)?;
+            if self.fast {x=self.take(ctx.scaled_residual(&x,&y,&gamma))?;}
+            else {let y=self.take(ctx.affine(&y,&gamma,&zeros,1))?;x=self.add(&x,&y)?;}
             self.record(&format!("vision.block.{i}"), &x);
         }
         x = self.norm(&x, &format!("{p}.norm"), None)?;
@@ -185,7 +210,10 @@ impl Builder<'_> {
     }
     fn residual(&mut self, x: &Tensor, condition_silu: &Tensor, n: &str) -> Result<Tensor> {
         let ctx = self.ctx.clone();
-        let film = self.linear(condition_silu, &format!("{n}.film.1"))?;
+        let film = if self.fast {
+            let all=self.films.get(n).ok_or("missing prepared FiLM")?;
+            let width=all.shape()[1];all.view(self.step*width,&[1,width])?
+        } else { self.linear(condition_silu, &format!("{n}.film.1"))? };
         let channels = film.len() / 2;
         let scale = film.view(0, &[channels])?;
         let scale = self.take(ctx.scale(&scale, 1., 1.))?;
@@ -206,8 +234,9 @@ impl Builder<'_> {
     }
     fn denoise(&mut self, sample: &Tensor, obs: &Tensor, time: &Tensor) -> Result<Tensor> {
         let ctx = self.ctx.clone();
-        let cond = self.take(ctx.concat(obs, time, 1))?;
-        let cond = self.act(&cond, Activation::Silu)?;
+        let cond = if self.fast {obs.clone()} else {
+            let c=self.take(ctx.concat(obs,time,1))?;self.act(&c,Activation::Silu)?
+        };
         let x = self.take(ctx.permute(sample, &[0, 2, 1]))?;
         let d1 = self.residual(&x, &cond, "down1")?;
         let x = self.conv1(&d1, "downsample1", 2, 1, false)?;
@@ -227,10 +256,15 @@ impl Builder<'_> {
 impl Model {
     pub fn build(ctx: Context, w: &mut Weights, variant: &'static str, external_vision: bool) -> Result<Self> {
         let image = if external_vision {ctx.zeros(&[1,24576])?} else {ctx.zeros(&[4, 3, 224, 294])?};
+        let rgb=if matches!(variant,"f32_fast")&&!external_vision {Some(ctx.rgb_batch_processor(&image,288)?)} else {None};
         let state = ctx.zeros(&[1, 248])?;
         let noise = ctx.zeros(&[1, 24, 3])?;
         let mut b = Builder {
-            fp16: variant!="f32",
+            fp16: matches!(variant,"fp16"|"fp8_policy"),
+            compensated: matches!(variant,"f32_compensated"|"f32_fast"),
+            fast: matches!(variant,"f32_fast"),
+            step: 0, films: Default::default(),
+            transpose_gemm: variant=="f32_gemm",
             fp8_policy: variant=="fp8_policy",
             ctx: ctx.clone(),
             w,
@@ -247,12 +281,38 @@ impl Model {
         if coeff.len() != 40 || time_inputs.shape() != [10, 384] {
             return Err("invalid DDIM assets".into());
         }
+        // Timestep embeddings depend only on immutable weights and the fixed
+        // scheduler. Prepare once with the same F32 operator order as baseline.
+        let prepared_time = if b.fast {
+            let begin=b.ops.len();let mut times=Vec::new();
+            for i in 0..10 {
+                let ti=time_inputs.view(i*384,&[1,384])?;
+                let t=b.linear(&ti,"time.1")?;let t=b.act(&t,Activation::Silu)?;
+                times.push(b.linear(&t,"time.3")?);
+            }
+            for op in &b.ops[begin..] {op.run()?;}
+            ctx.synchronize()?;
+            let mut values=Vec::new();for t in &times {values.extend(t.read()?);}
+            b.ops.truncate(begin);
+            let time=ctx.tensor(&[10,384],&values)?;
+            let mut repeated=obs.clone();
+            for _ in 1..10 {repeated=b.take(ctx.concat(&repeated,&obs,0))?;}
+            let cond=b.take(ctx.concat(&repeated,&time,1))?;
+            let cond=b.act(&cond,Activation::Silu)?;
+            for n in ["down1","down2","mid","up2","up1"] {
+                let film=b.linear(&cond,&format!("{n}.film.1"))?;b.films.insert(n.into(),film);
+            }
+            Some(time)
+        } else {None};
         let mut sample = noise.clone();
         for i in 0..10 {
-            let ti = time_inputs.view(i * 384, &[1, 384])?;
-            let time = b.linear(&ti, "time.1")?;
-            let time = b.act(&time, Activation::Silu)?;
-            let time = b.linear(&time, "time.3")?;
+            b.step=i;
+            let time=if let Some(t)=&prepared_time {t.view(i*384,&[1,384])?} else {
+                let ti = time_inputs.view(i * 384, &[1, 384])?;
+                let time = b.linear(&ti, "time.1")?;
+                let time = b.act(&time, Activation::Silu)?;
+                b.linear(&time, "time.3")?
+            };
             let eps = b.denoise(&sample, &obs, &time)?;
             b.record(&format!("epsilon.{i}"), &eps);
             // Preserve the DDIM reference operation boundaries before clipping x0.
@@ -274,6 +334,7 @@ impl Model {
             variant,
             ctx,
             image,
+            rgb,
             state,
             noise,
             output: sample,

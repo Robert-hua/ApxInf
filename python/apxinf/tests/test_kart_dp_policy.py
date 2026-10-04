@@ -77,3 +77,21 @@ def test_external_vision_rejects_unpaired_artifacts_before_cuda(tmp_path, monkey
     engine.with_suffix('.json').write_text(json.dumps(metadata))
     with pytest.raises(ValueError,match='identity mismatch'):
         KartTrtVision(engine,tmp_path)
+
+def test_fast_path_uploads_all_four_new_rgb_frames_and_noise():
+    p=policy();p._gpu_rgb=True
+    class PixelRunner(Runner):
+        def infer_pixels(self,image,state,mean,std,noise):
+            self.pixel_input=image.copy();self.normalization=(mean,std)
+            return self.infer_tensors(image,state,noise)
+    p.model_runner=PixelRunner()
+    image=np.arange(4*240*320*3,dtype=np.uint8).reshape(4,240,320,3)
+    ob={'observation.images.front':image,'observation.state':np.ones((4,62))}
+    p.infer(ob);np.testing.assert_array_equal(p.model_runner.pixel_input,image[:,8:232,16:304])
+    assert p.model_runner.pixel_input.dtype==np.uint8
+    assert p.model_runner.pixel_input.flags.c_contiguous
+    changed=np.bitwise_xor(image,np.uint8(255));ob['observation.images.front']=changed
+    noise=np.ones((1,24,3),np.float32);p.infer(ob,noise=noise)
+    np.testing.assert_array_equal(p.model_runner.pixel_input,changed[:,8:232,16:304])
+    np.testing.assert_array_equal(p.model_runner.inputs[2],noise)
+    np.testing.assert_allclose(p.model_runner.normalization[0],[.485,.456,.406])
