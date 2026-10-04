@@ -66,13 +66,17 @@ class KartDpPolicy:
     def _infer(self, observation, noise):
         if self._closed:
             raise RuntimeError("kart_dp policy is closed")
-        image=np.asarray(observation["observation.images.front"])
+        source=observation["observation.images.front"]
+        device_rgb=isinstance(source,(list,tuple)) and len(source)==4 and all(hasattr(x,"__cuda_array_interface__") for x in source)
+        if device_rgb and not self._gpu_rgb:
+            raise ValueError("CUDA RGB input requires native f32_fast")
+        image=source if device_rgb else np.asarray(source)
         state=np.asarray(observation["observation.state"],dtype=np.float32)
-        if image.dtype!=np.uint8 or image.shape not in ((4,240,320,3),(4,224,288,3)):
+        if not device_rgb and (image.dtype!=np.uint8 or image.shape not in ((4,240,320,3),(4,224,288,3))):
             raise ValueError("kart_dp requires four RGB uint8 frames [4,240,320,3] or [4,224,288,3]")
         if state.shape!=(4,62) or not np.isfinite(state).all():
             raise ValueError("kart_dp requires finite oldest-to-newest state [4,62]")
-        if image.shape[1:3]==(240,320):
+        if not device_rgb and image.shape[1:3]==(240,320):
             image=image[:,8:232,16:304]
         if not self._gpu_rgb:
             image=image.transpose(0,3,1,2).astype(np.float32)/np.float32(255)
@@ -85,7 +89,9 @@ class KartDpPolicy:
         noise=self.noise if noise is None else np.asarray(noise,dtype=np.float32)
         if noise.shape!=(1,24,3) or not np.isfinite(noise).all():
             raise ValueError("kart_dp noise must be finite [1,24,3]")
-        if self._gpu_rgb:
+        if device_rgb:
+            prediction=np.asarray(self.model_runner.infer_device_pixels(image,state,self.mean.reshape(3).tolist(),self.std.reshape(3).tolist(),np.ascontiguousarray(noise)))
+        elif self._gpu_rgb:
             prediction=np.asarray(self.model_runner.infer_pixels(np.ascontiguousarray(image),state,self.mean.reshape(3).tolist(),self.std.reshape(3).tolist(),np.ascontiguousarray(noise)))
         else:
             prediction=np.asarray(self.model_runner.infer_tensors(image,state,np.ascontiguousarray(noise)))

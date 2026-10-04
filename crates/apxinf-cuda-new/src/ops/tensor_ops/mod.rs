@@ -15,6 +15,7 @@ struct Spec {
     f: [f32; 4],
 }
 unsafe extern "C" {
+    fn apx_tensor_rgb_batch_device(c:*mut c_void,batch:i32,height:i32,width:i32,padded:i32,frames:*const usize,staging:*mut u8,y:*mut f32,mean:*const f32,std:*const f32)->i32;
     fn apx_tensor_rgb_batch(c:*mut c_void,batch:i32,height:i32,width:i32,padded:i32,x:*const u8,y:*mut f32,mean:*const f32,std:*const f32)->i32;
     fn apx_tensor_error() -> *const std::ffi::c_char;
     fn apx_tensor_context_create(device: i32, out: *mut *mut c_void) -> i32;
@@ -853,6 +854,18 @@ impl RgbProcessor {
 /// Batched HWC RGB upload with symmetric horizontal edge padding and FP32 normalization.
 /// Separate prepared provider; existing single-image RGB behavior is unchanged.
 pub struct RgbBatchProcessor {input:CudaBuffer,output:Tensor,context:Context,width:usize}
+
+/// Borrowed, producer-complete RGB allocations. Ownership stays with the caller.
+pub struct ReadyDeviceRgb<'a> { frames: &'a [usize], frame_bytes: usize }
+impl<'a> ReadyDeviceRgb<'a> {
+    /// # Safety
+    /// Every address must remain allocated and immutable through the synchronous
+    /// request; the producer must have completed its writes before construction.
+    /// The backend additionally checks CUDA device, allocation bounds and type.
+    pub unsafe fn from_raw_frames(frames: &'a [usize], frame_bytes: usize) -> Self {
+        Self { frames, frame_bytes }
+    }
+}
 impl Context {
     pub fn rgb_batch_processor(&self,output:&Tensor,width:usize)->Result<RgbBatchProcessor>{
         if output.shape.len()!=4 || output.shape[1]!=3 || width==0 || width>output.shape[3]
@@ -864,6 +877,16 @@ impl Context {
     }
 }
 impl RgbBatchProcessor {
+    pub fn write_device(&self, source:&ReadyDeviceRgb<'_>, mean:[f32;3], std:[f32;3])->Result<()> {
+        let s=&self.output.shape;
+        if source.frames.len()!=s[0] || source.frame_bytes!=s[2]*self.width*3
+            || mean.iter().any(|v|!v.is_finite()) || std.iter().any(|v|!v.is_finite()||*v<=0.) {
+            return Err("device RGB batch input/normalization mismatch".into());
+        }
+        check(unsafe {apx_tensor_rgb_batch_device(self.context.0.raw,s[0]as i32,s[2]as i32,
+            self.width as i32,s[3]as i32,source.frames.as_ptr(),self.input.ptr().cast(),
+            self.output.buffer.ptr().cast(),mean.as_ptr(),std.as_ptr())})
+    }
     pub fn write(&self,bytes:&[u8],mean:[f32;3],std:[f32;3])->Result<()>{
         if bytes.len()!=self.input.len() || mean.iter().any(|v|!v.is_finite()) || std.iter().any(|v|!v.is_finite()||*v<=0.){return Err("RGB batch input/normalization mismatch".into());}
         self.context.synchronize()?;self.input.copy_from_host(bytes)?;let s=&self.output.shape;

@@ -108,6 +108,24 @@ The FP32 input seam remains available. No historical image/feature cache is
 used: all four frames and the entire vision graph execute every request.
 The original `f32` default and existing families retain their provider choices.
 
+`f32_fast` also accepts a list/tuple of four producer-complete CUDA Array
+Interface v3 exporters at `observation.images.front`. Each must advertise
+contiguous RGB uint8 `[224,288,3]`, `typestr="|u1"`, `strides=None` and
+`stream=None`. The caller must retain each allocation without concurrent writes
+until synchronous `infer` returns. The binding retains the exporters and rejects
+shape/dtype/stream mismatches; the backend checks actual CUDA device, allocation
+type and bounds. Four D2D copies fill model-owned stable RGB storage, followed by
+the same GPU normalization and full graph. There is no image D2H/H2D handoff.
+This is device-resident staging, not zero-copy. State/noise keep their existing
+host contract and prediction keeps its independently owned host result.
+
+`ModelRunner.infer_device_pixels` is synchronous. Applications may own it in an
+inference worker while native camera capture runs independently; this does not
+make the runner a nonblocking submit/poll API or enable simultaneous calls on
+one model instance. The parent `scripts/kart_gpu_camera_smoke.py` demonstrates
+the camera producer, checkpoint-strided GPU history and capacity-one result
+mailbox without importing an actuator.
+
 With explicit `autotune=True`, preparation additionally searches cuBLASLt
 tactics for the compensated products, retaining FP32 accumulation/output and
 the existing bias epilogue. Tuning executes once before either eager or Graph

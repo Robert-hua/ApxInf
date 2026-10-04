@@ -26,6 +26,7 @@ int apx_tensor_enqueue(void* execution);
 int apx_tensor_tune(void* execution);
 int apx_tensor_rgb_normalize(void* context,int pixels,const unsigned char* x,float* y,const float* mean,const float* std);
 int apx_tensor_rgb_batch(void* context,int batch,int height,int width,int padded,const unsigned char* x,float* y,const float* mean,const float* std);
+int apx_tensor_rgb_batch_device(void* context,int batch,int height,int width,int padded,const uintptr_t* frames,unsigned char* staging,float* y,const float* mean,const float* std);
 void apx_tensor_destroy(void* execution);
 int apx_tensor_capture_begin(void* context);
 int apx_tensor_capture_end(void* context, void** graph);

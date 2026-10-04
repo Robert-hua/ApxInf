@@ -66,6 +66,12 @@ class ModelRunner:
         self, image: npt.NDArray[np.uint8], state: npt.NDArray[np.float32],
         mean: list[float], std: list[float], noise: npt.NDArray[np.float32] | None = None,
     ) -> npt.NDArray[np.float32]: ...
+    def infer_device_pixels(
+        self, images: list[object], state: npt.NDArray[np.float32],
+        mean: list[float], std: list[float], noise: npt.NDArray[np.float32],
+    ) -> npt.NDArray[np.float32]:
+        """Synchronous producer-complete CUDA Array Interface v3 RGB frames; CUDA build only."""
+        ...
     def infer_tensors(
         self, image: npt.NDArray[np.float32], state: npt.NDArray[np.float32],
         noise: npt.NDArray[np.float32] | None = None,

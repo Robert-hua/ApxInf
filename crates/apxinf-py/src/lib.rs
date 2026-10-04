@@ -485,6 +485,42 @@ impl ModelRunner {
         self.action_array(py,runtime.infer_tensors_host_f32(&request).map_err(runtime_err)?)
     }
 
+    /// Synchronous four-frame CUDA Array Interface input. Producers must have
+    /// completed writes (stream=None); owners are retained through this call.
+    #[cfg(feature = "cuda")]
+    fn infer_device_pixels<'py>(&self,py:Python<'py>,images:Vec<Py<PyAny>>,
+        state:PyReadonlyArrayDyn<'py,f32>,mean:[f32;3],std:[f32;3],
+        noise:PyReadonlyArrayDyn<'py,f32>)->PyResult<Bound<'py,PyArray2<f32>>>{
+        let runtime=self.model.vla().map_err(runtime_err)?;
+        if images.len()!=4 || state.shape()!=[1,248] || noise.shape()!=[1,24,3] {
+            return Err(PyValueError::new_err("device RGB requires four frames, state [1,248], noise [1,24,3]"));
+        }
+        let mut pointers=Vec::with_capacity(4);
+        for owner in &images {
+            let cai=owner.bind(py).getattr("__cuda_array_interface__")?;
+            let shape:Vec<usize>=cai.get_item("shape")?.extract()?;
+            let dtype:String=cai.get_item("typestr")?.extract()?;
+            let version:i32=cai.get_item("version")?.extract()?;
+            let strides=cai.call_method1("get",("strides",))?;
+            let stream=cai.call_method1("get",("stream",))?;
+            if shape!=[224,288,3] || dtype!="|u1" || version!=3 || !strides.is_none() || !stream.is_none() {
+                return Err(PyValueError::new_err("expected producer-complete contiguous CUDA RGB uint8 [224,288,3], CAI v3 stream=None"));
+            }
+            let (ptr,_readonly):(usize,bool)=cai.get_item("data")?.extract()?;
+            if ptr==0 {return Err(PyValueError::new_err("null CUDA RGB pointer"));}
+            pointers.push(ptr);
+        }
+        // SAFETY: CAI exporters own the advertised allocations and are retained
+        // in `images`. Their stream=None contract promises completed writes.
+        let source=unsafe {apxinf_model::vla::ReadyDeviceRgb::from_raw_frames(&pointers,224*288*3)};
+        let request=apxinf_model::vla::TensorRequest {
+            image:apxinf_model::vla::ImageTensor::DeviceRgb{source:&source,mean,std},
+            state:apxinf_model::vla::HostTensor{shape:state.shape(),values:state.as_slice().map_err(|_|PyValueError::new_err("state must be contiguous"))?},
+            noise:Some(apxinf_model::vla::HostTensor{shape:noise.shape(),values:noise.as_slice().map_err(|_|PyValueError::new_err("noise must be contiguous"))?}),
+        };
+        self.action_array(py,runtime.infer_tensors_host_f32(&request).map_err(runtime_err)?)
+    }
+
     #[pyo3(signature = (mode="graph"))]
     fn prepare_tensors(&self, mode: &str) -> PyResult<String> {
         let policy = match mode {

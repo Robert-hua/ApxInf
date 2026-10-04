@@ -95,3 +95,21 @@ def test_fast_path_uploads_all_four_new_rgb_frames_and_noise():
     np.testing.assert_array_equal(p.model_runner.pixel_input,changed[:,8:232,16:304])
     np.testing.assert_array_equal(p.model_runner.inputs[2],noise)
     np.testing.assert_allclose(p.model_runner.normalization[0],[.485,.456,.406])
+
+def test_device_observation_retains_exporters_and_uses_normal_state_contract():
+    p=policy();p._gpu_rgb=True
+    class Frame:
+        __cuda_array_interface__={"version":3,"shape":(224,288,3),"typestr":"|u1",
+                                  "data":(123,True),"strides":None,"stream":None}
+        def __array__(self,*args,**kwargs):raise AssertionError("device images must not be coerced to NumPy")
+    frames=[Frame() for _ in range(4)]
+    class DeviceRunner(Runner):
+        def infer_device_pixels(self,images,state,mean,std,noise):
+            assert images is frames
+            np.testing.assert_array_equal(state,np.ones((1,248)))
+            return np.zeros((24,3),np.float32)
+    p.model_runner=DeviceRunner()
+    ob={"observation.images.front":frames,"observation.state":np.full((4,62),3,np.float32)}
+    assert p.infer(ob)["actions"].shape==(24,3)
+    p._gpu_rgb=False
+    with pytest.raises(ValueError,match="native f32_fast"):p.infer(ob)

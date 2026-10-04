@@ -56,6 +56,10 @@ impl VlaRuntime for ModelRunner {
             return Err(Error::Other("kart_dp state/noise profile mismatch".into()));
         }
         match r.image {
+            ImageTensor::DeviceRgb{source,mean,std}=>{
+                self.model.rgb.as_ref().ok_or_else(||Error::Other("device RGB requires native f32_fast".into()))?
+                    .write_device(source,mean,std).map_err(Error::Other)?;
+            }
             ImageTensor::Normalized(image)=>{
                 if image.shape!=self.model.image.shape() || image.values.iter().any(|v|!v.is_finite()) {
                     return Err(Error::Other("kart_dp float image profile mismatch".into()));

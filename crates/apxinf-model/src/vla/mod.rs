@@ -274,8 +274,12 @@ pub struct HostTensor<'a> {
     pub shape: &'a [usize],
     pub values: &'a [f32],
 }
+#[cfg(feature = "cuda")]
+pub use apxinf_cuda_next::tensor_ops::ReadyDeviceRgb;
 #[derive(Clone, Copy)]
 pub enum ImageTensor<'a> {
+    #[cfg(feature = "cuda")]
+    DeviceRgb { source:&'a apxinf_cuda_next::tensor_ops::ReadyDeviceRgb<'a>, mean:[f32;3], std:[f32;3] },
     Normalized(HostTensor<'a>),
     RgbU8 { shape:&'a[usize], values:&'a[u8], mean:[f32;3], std:[f32;3] },
 }

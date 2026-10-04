@@ -63,6 +63,7 @@ impl VlaRuntime for ModelRunner {
         self.model.noise.write(&noise).map_err(Error::Other)?;
         self.model.state.write(&state).map_err(Error::Other)?;
         match r.image {
+            ImageTensor::DeviceRgb{..}=>return Err(Error::Other("device RGB input is not supported by Diffusion".into())),
             ImageTensor::Normalized(image)=>{
                 if image.shape!=profile.image_shape || image.values.iter().any(|v|!v.is_finite()){return Err(Error::Other("invalid normalized image".into()))}
                 self.model.image.write(image.values).map_err(Error::Other)?;

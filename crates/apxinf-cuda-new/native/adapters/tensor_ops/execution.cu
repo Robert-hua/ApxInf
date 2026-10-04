@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
+#include <cuda.h>
 extern "C" int apx_fmha_f32_prepare();
 extern "C" int apx_fmha_f32_run(int,int,int,const float*,float*,cudaStream_t);
 namespace {
@@ -276,4 +277,27 @@ extern "C" int apx_tensor_rgb_normalize(void*c,int pixels,const unsigned char*x,
 extern "C" int apx_tensor_rgb_batch(void*c,int batch,int height,int width,int padded,const unsigned char*x,float*y,const float*mean,const float*std){return guard([&]{
  auto*ctx=static_cast<Context*>(c);int n=batch*3*height*padded;
  apx_compensated::rgb_padded<<<(n+255)/256,256,0,ctx->stream>>>(n,height,width,padded,x,y,mean[0],mean[1],mean[2],std[0],std[1],std[2]);ck(cudaPeekAtLastError());
+});}
+
+// Producer-complete external frames are copied D2D into graph-owned storage.
+// Validate all inputs before enqueueing, and finish the copies even on failure
+// so the synchronous caller can release its external leases safely.
+extern "C" int apx_tensor_rgb_batch_device(void*c,int batch,int height,int width,int padded,
+ const uintptr_t*frames,unsigned char*staging,float*y,const float*mean,const float*std){return guard([&]{
+ auto*ctx=static_cast<Context*>(c);int device=0;ck(cudaGetDevice(&device));
+ size_t bytes=size_t(height)*width*3;
+ for(int i=0;i<batch;i++){
+  cudaPointerAttributes attrs{};ck(cudaPointerGetAttributes(&attrs,reinterpret_cast<void*>(frames[i])));
+  if(attrs.type!=cudaMemoryTypeDevice || attrs.device!=device)throw std::runtime_error("RGB source must be same-device CUDA allocation");
+  CUdeviceptr base=0;size_t size=0;
+  if(cuMemGetAddressRange(&base,&size,frames[i])!=CUDA_SUCCESS || frames[i]<base || frames[i]-base>size || bytes>size-(frames[i]-base))
+   throw std::runtime_error("RGB source allocation is too small");
+ }
+ try {
+  for(int i=0;i<batch;i++)ck(cudaMemcpyAsync(staging+i*bytes,reinterpret_cast<void*>(frames[i]),bytes,cudaMemcpyDeviceToDevice,ctx->stream));
+  int n=batch*3*height*padded;
+  apx_compensated::rgb_padded<<<(n+255)/256,256,0,ctx->stream>>>(n,height,width,padded,staging,y,mean[0],mean[1],mean[2],std[0],std[1],std[2]);
+  ck(cudaPeekAtLastError());
+ } catch(...) {cudaStreamSynchronize(ctx->stream);throw;}
+ ck(cudaStreamSynchronize(ctx->stream));
 });}
