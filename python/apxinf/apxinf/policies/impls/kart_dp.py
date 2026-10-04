@@ -10,22 +10,33 @@ from ..registry import register_policy
 class KartDpPolicy:
     @classmethod
     def from_pretrained(cls, model_dir, *, device="cuda:0", model_runner=None,
-                        model_variant="f32", autotune=False):
+                        model_variant="f32", autotune=False, vision_engine=None):
         root = Path(model_dir)
         config = json.loads((root / "config.json").read_text())
         if config.get("model_type") != "kart_dp" or config.get("format_version") != 1:
             raise ValueError("Expected exported kart_dp format_version 1")
-        if model_variant != "f32":
-            raise ValueError("kart_dp currently supports f32 only")
+        if model_variant not in ("f32", "fp16", "fp8_policy"):
+            raise ValueError("kart_dp supports f32 or experimental fp16/fp8_policy")
         adapter = json.loads((root / "adapter.json").read_text())
-        if model_runner is None:
-            from apxinf import ModelRunner
-            model_runner = ModelRunner.load("kart_dp", root, device=device,
-                                           model_variant=model_variant, autotune=autotune)
-        return cls(config, adapter, model_runner)
+        vision=None
+        try:
+            if vision_engine is not None:
+                from .kart_dp_trt import KartTrtVision
+                if model_runner is not None:raise ValueError("vision_engine owns its native runner contract")
+                vision=KartTrtVision(vision_engine,root,int(str(device).split(":")[-1]))
+            if model_runner is None:
+                from apxinf import ModelRunner
+                assets={"vision_features":vision.manifest_path} if vision else {}
+                model_runner = ModelRunner.load("kart_dp", root, device=device,
+                                               model_variant=model_variant, autotune=autotune,assets=assets)
+            return cls(config, adapter, model_runner, model_variant=model_variant,vision=vision)
+        except BaseException:
+            if vision is not None:vision.close()
+            raise
 
-    def __init__(self, config, adapter, model_runner):
+    def __init__(self, config, adapter, model_runner, *, model_variant="f32", vision=None):
         self.model_runner = model_runner
+        self.vision = vision
         self._lock = Lock()
         self._closed = False
         self.state_mean = np.asarray(adapter["state_mean"], dtype=np.float32)
@@ -42,11 +53,13 @@ class KartDpPolicy:
         self.std = np.asarray(adapter["image_std"],np.float32).reshape(1,3,1,1)
         if not np.isfinite(self.mean).all() or not np.isfinite(self.std).all() or (self.std<=0).any():
             raise ValueError("Invalid image normalization")
-        self.metadata = {"model_type":"kart_dp", "model_variant":"f32", "action_horizon":24,
+        self.metadata = {"model_type":"kart_dp", "model_variant":model_variant, "action_horizon":24,
                          "prediction_horizon":24, "action_dim":3, "state_dim":62,
                          "n_obs_steps":4, "image_shape":[224,288,3],
                          "obs_stride":config.get("obs_stride"), "action_stride":config.get("action_stride"),
                          "action_axes":config["action_axes"], "action_units":"recorded_normalized_controls",
+                         "vision_backend":"tensorrt" if vision else "native",
+                         "vision_handoff":"host D2H/H2D features" if vision else "GPU resident",
                          "scheduler":"DDIM", "denoising_steps":10, "weight_branch":config["weight_branch"]}
 
     def _infer(self, observation, noise):
@@ -61,8 +74,11 @@ class KartDpPolicy:
         if image.shape[1:3]==(240,320):
             image=image[:,8:232,16:304]
         image=image.transpose(0,3,1,2).astype(np.float32)/np.float32(255)
-        image=np.pad(image,((0,0),(0,0),(0,0),(3,3)),mode="edge")
-        image=np.ascontiguousarray((image-self.mean)/self.std)
+        if self.vision is not None:
+            image=self.vision.infer(image[None])
+        else:
+            image=np.pad(image,((0,0),(0,0),(0,0),(3,3)),mode="edge")
+            image=np.ascontiguousarray((image-self.mean)/self.std)
         state=np.ascontiguousarray(((state-self.state_mean)/self.state_std).reshape(1,248))
         noise=self.noise if noise is None else np.asarray(noise,dtype=np.float32)
         if noise.shape!=(1,24,3) or not np.isfinite(noise).all():
@@ -95,4 +111,5 @@ class KartDpPolicy:
         try:
             self._closed=True
             self.model_runner=None
+            if self.vision is not None:self.vision.close();self.vision=None
         finally: self._lock.release()

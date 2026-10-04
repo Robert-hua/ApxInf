@@ -2,6 +2,7 @@
 use super::weights::{Result, Weights};
 use apxinf_cuda_next::tensor_ops::{Activation, Context, Operation, Tensor};
 pub(super) struct Model {
+    pub variant: &'static str,
     pub ctx: Context,
     pub image: Tensor,
     pub state: Tensor,
@@ -11,6 +12,8 @@ pub(super) struct Model {
     pub diagnostics: Vec<(String, Tensor)>,
 }
 struct Builder<'a> {
+    fp16: bool,
+    fp8_policy: bool,
     ctx: Context,
     w: &'a mut Weights,
     ops: Vec<Operation>,
@@ -28,7 +31,9 @@ impl Builder<'_> {
     fn linear(&mut self, x: &Tensor, n: &str) -> Result<Tensor> {
         let w = self.w.get(&format!("{n}.weight"))?;
         let b = self.w.get(&format!("{n}.bias"))?;
-        self.take(self.ctx.linear(x, &w, Some(&b)))
+        if self.fp8_policy && !n.starts_with("vision.") { self.take(self.ctx.linear_fp8(x, &w, Some(&b))) }
+        else if self.fp16 { self.take(self.ctx.linear_fp16(x, &w, Some(&b))) }
+        else { self.take(self.ctx.linear(x, &w, Some(&b))) }
     }
     fn act(&mut self, x: &Tensor, a: Activation) -> Result<Tensor> {
         self.take(self.ctx.activation(x, a))
@@ -71,6 +76,10 @@ impl Builder<'_> {
         transpose: bool,
     ) -> Result<Tensor> {
         let w = self.w.get(&format!("{n}.weight"))?;
+        if self.fp16 {
+            let bias = self.w.get(&format!("{n}.bias"))?;
+            return self.take(self.ctx.conv1d_fp16(x, &w, Some(&bias), stride, pad, transpose));
+        }
         let s = w.shape();
         let w = w.reshape(&[s[0], s[1], 1, s[2]])?;
         let bias = self.w.get(&format!("{n}.bias"))?;
@@ -216,17 +225,19 @@ impl Builder<'_> {
     }
 }
 impl Model {
-    pub fn build(ctx: Context, w: &mut Weights) -> Result<Self> {
-        let image = ctx.zeros(&[4, 3, 224, 294])?;
+    pub fn build(ctx: Context, w: &mut Weights, variant: &'static str, external_vision: bool) -> Result<Self> {
+        let image = if external_vision {ctx.zeros(&[1,24576])?} else {ctx.zeros(&[4, 3, 224, 294])?};
         let state = ctx.zeros(&[1, 248])?;
         let noise = ctx.zeros(&[1, 24, 3])?;
         let mut b = Builder {
+            fp16: variant!="f32",
+            fp8_policy: variant=="fp8_policy",
             ctx: ctx.clone(),
             w,
             ops: vec![],
             diagnostics: vec![],
         };
-        let vision = b.vision(&image)?;
+        let vision = if external_vision {b.w.external_vision();image.clone()} else {b.vision(&image)?};
         let obs = b.take(ctx.concat(&state, &vision, 1))?;
         let obs = b.linear(&obs, "obs_proj.0")?;
         let obs = b.act(&obs, Activation::Silu)?;
@@ -260,6 +271,7 @@ impl Model {
         }
         b.w.finish()?;
         Ok(Self {
+            variant,
             ctx,
             image,
             state,

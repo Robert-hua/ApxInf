@@ -204,3 +204,19 @@ storage. Kart selects these APIs; existing ACT, Diffusion and PI0.5 model code
 is unchanged. Legacy primitives are exactly restored to `fd47565^`, including
 the previously diagnosed multi-warp race: do not claim that path is repaired.
 Focused f64/repeated/Graph tests qualify only the new provider.
+
+
+`linear_fp16` / `conv1d_fp16` select independent prepared providers in
+`native/adapters/tensor_ops/low_precision.cuh` (kinds 15/16/17). They use FP16
+operands and FP32 GEMM accumulation, bias and output; nonlinear operators retain
+the family's existing FP32 path. Forward Conv1d uses half im2col; transposed
+Conv1d packs weights at prepare and gathers overlap sums in FP32 after GEMM.
+Each provider owns a cuBLAS handle on the existing stream and preallocated
+scratch; it does not change context precision or legacy kernel dispatch.
+
+`linear_fp8` (kind 18) is a Thor sm110 E4M3 candidate. Weights are quantized at
+prepare, activations use a per-tensor absmax/448 scale at replay, and cuBLASLt
+performs real FP8 GEMM with FP32 accumulation/output. Alignment padding,
+activation quantization, scales, unpadding and FP32 bias are part of execution.
+The padded activation/output scratch is bounded to 64 MiB and Lt workspace to
+4 MiB. This is an experimental operator, not evidence of model quality.

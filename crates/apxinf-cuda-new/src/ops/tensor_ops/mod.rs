@@ -228,6 +228,46 @@ impl Context {
         let op = self.prepare(0, &[m, n, k], &[], &args, &y)?;
         Ok((y, op))
     }
+    /// Opt-in FP16 operands with FP32 GEMM accumulation, output and bias.
+    /// Independent provider; does not change context precision or legacy dispatch.
+    pub fn linear_fp16(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
+        self.linear_lowp(x,w,bias,15)
+    }
+    /// Experimental E4M3 per-tensor scaled Linear, FP32 accumulation/output.
+    pub fn linear_fp8(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
+        self.linear_lowp(x,w,bias,18)
+    }
+    fn linear_lowp(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, kind: i32) -> Result<(Tensor, Operation)> {
+        if !w.immutable.get() || w.shape.len()!=2 || x.shape.last()!=Some(&w.shape[1]) {
+            return Err("FP16 linear requires immutable compatible weights".into());
+        }
+        let (n,k)=(w.shape[0],w.shape[1]);let m=x.len()/k;
+        if kind==18 {let (mp,np,kp)=((m+15)/16*16,(n+15)/16*16,(k+15)/16*16);count(&[mp,kp])?;count(&[np,kp])?;count(&[mp,np])?;}
+        if bias.is_some_and(|b|b.shape!=[n]) { return Err("FP16 linear bias mismatch".into()); }
+        let mut shape=x.shape.clone();*shape.last_mut().unwrap()=n;
+        let y=self.zeros(&shape)?;let mut args=vec![x,w];if let Some(b)=bias{args.push(b);}
+        let op=self.prepare(kind,&[m,n,k],&[],&args,&y)?;Ok((y,op))
+    }
+    /// Opt-in NCL forward/transposed Conv1d through prepared FP16 GEMM lowering.
+    pub fn conv1d_fp16(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>, stride: usize, pad: usize, transpose: bool) -> Result<(Tensor, Operation)> {
+        if x.shape.len()!=3 || w.shape.len()!=3 || !w.immutable.get() || stride==0 {
+            return Err("FP16 Conv1d shape/stride/immutable weights required".into());
+        }
+        let (batch,ci,length)=(x.shape[0],x.shape[1],x.shape[2]);let kernel=w.shape[2];
+        let co=if transpose {w.shape[1]}else{w.shape[0]};
+        if (if transpose {w.shape[0]}else{w.shape[1]})!=ci || bias.is_some_and(|b|b.shape!=[co]) {
+            return Err("FP16 Conv1d channel/bias mismatch".into());
+        }
+        let padding=pad.checked_mul(2).ok_or("padding overflow")?;
+        let out=if transpose {
+            (length-1).checked_mul(stride).and_then(|v|v.checked_add(kernel)).and_then(|v|v.checked_sub(padding)).ok_or("transpose output overflow")?
+        }else{
+            length.checked_add(padding).and_then(|v|v.checked_sub(kernel)).ok_or("convolution kernel exceeds input")?/stride+1
+        };
+        count(&[ci,co,kernel])?;count(&[ci,kernel,out])?;count(&[co,kernel,length])?;
+        let y=self.zeros(&[batch,co,out])?;let mut args=vec![x,w];if let Some(b)=bias{args.push(b);}
+        let op=self.prepare(if transpose{17}else{16},&[batch,ci,length,co,kernel,out,stride,pad],&[],&args,&y)?;Ok((y,op))
+    }
     pub fn conv2d(
         &self,
         x: &Tensor,

@@ -4,6 +4,8 @@
 // Conv kind 1/2 p[14]: 0=context precision, 1=BF16 (requires BF16 context).
 // Conv kind 1 p[15]: 1=explicit FP32 im2col Conv1d, 0=existing provider selection.
 // Kinds 13/14: opt-in block LayerNorm/Softmax; legacy kinds 4/5 are unchanged.
+// Kinds 15/16/17: isolated FP16 Linear/Conv1d/ConvTranspose1d (F32 outputs).
+// Kind 18: isolated dynamically scaled E4M3 Linear (F32 accumulation/output).
 // Zero-initialized existing callers retain their original behavior.
 struct apx_tensor_spec { int32_t kind; int32_t p[24]; float f[4]; };
 extern "C" {

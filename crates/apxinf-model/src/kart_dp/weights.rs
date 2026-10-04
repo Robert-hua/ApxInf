@@ -61,6 +61,14 @@ impl Weights {
     pub fn has(&self, name: &str) -> bool {
         self.host.contains_key(name)
     }
+    /// External vision owns these tensors; mark the exact namespace as mapped.
+    pub fn external_vision(&mut self) {
+        for name in self.host.keys() {
+            if name.starts_with("vision.") || matches!(name.as_str(),"native.position"|"native.cls_tokens") {
+                self.used.insert(name.clone());
+            }
+        }
+    }
     pub fn finish(&self) -> Result<()> {
         let mut unused = self
             .host

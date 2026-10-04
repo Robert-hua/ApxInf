@@ -29,8 +29,12 @@ weights are different candidates and the choice is explicit in the export.
 
 Public loading uses `AutoPolicy.from_pretrained(path, model_type="kart_dp",
 model_variant="f32")`. Native detection uses `config.json:model_type`.
-Only f32 is admitted. BF16, FP8, other shapes, samplers and dynamic batch sizes
-are unsupported. `prepare(observation, mode="graph")` captures one full graph;
+`f32` remains default. Experimental `fp16` selects half operands for Linear
+and temporal forward/transposed Conv1d; accumulation, output, nonlinear math,
+DDIM, vision convolutions and attention remain FP32. `fp8_policy` changes policy
+Linears to per-tensor E4M3 and otherwise follows `fp16`; it is not an all-FP8
+model. BF16, other shapes, samplers and dynamic batch sizes are unsupported.
+Candidate admission does not imply numerical acceptance. `prepare(observation, mode="graph")` captures one full graph;
 `mode="eager"` clears it. `infer` accepts:
 
 - `observation.images.front`: RGB uint8 `[4,240,320,3]` or already center-cropped
@@ -54,3 +58,24 @@ unmasked inference is the supported profile. Export records hashes of the
 checkpoint, source, files, selected weight branch and static transforms.
 A registry entry or successful build does not establish numerical acceptance;
 see the parent ApexForge PROJECT_STATUS for current hardware evidence and limits.
+
+## Explicit TensorRT vision candidate
+
+The Python policy accepts `vision_engine=...` as an opt-in hybrid backend.
+The engine manifest must match the engine and checkpoint SHA, carry
+`input_contract=kart_dp_vision_features_v1`, and expose FP32 images
+`[1,4,3,224,288]` to features `[1,64,384]`. TensorRT owns image padding,
+normalization and DINO/projection/pooling. The native runner consumes flat
+features `[1,24576]`, state `[1,248]`, noise `[1,24,3]` and runs conditioning
+plus DDIM10. The named `vision_features` manifest explicitly enables that seam;
+ordinary native input is unchanged. Original vision assets are accounted as
+externally owned, not silently discarded as unused keys.
+
+The initial hybrid handoff copies features through host memory (TRT D2H then
+native H2D). It uses independent streams with synchronization at the handoff;
+only the native policy portion is captured by `prepare(mode="graph")`. The
+complete public call includes both engines and transfers. Do not describe this
+as all-native, zero-copy or a single whole-model graph. TensorRT/CUDA Python
+bindings are optional; loading normal `kart_dp` has no TensorRT dependency.
+Parent ApexForge evaluation tools build engines on the target host and report
+actual layer precision, FP32-reference action error and complete-call latency.

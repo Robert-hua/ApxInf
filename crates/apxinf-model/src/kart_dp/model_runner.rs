@@ -19,7 +19,7 @@ impl ModelRunner {
 }
 impl VlaRuntime for ModelRunner {
     fn model_variant(&self) -> Option<&'static str> {
-        Some("f32")
+        Some(self.model.variant)
     }
     fn contract(&self) -> VlaContract {
         VlaContract {
@@ -34,7 +34,7 @@ impl VlaRuntime for ModelRunner {
     }
     fn tensor_profile(&self) -> Option<TensorProfile> {
         Some(TensorProfile {
-            image_shape: vec![4, 3, 224, 294],
+            image_shape: self.model.image.shape().to_vec(),
             state_shape: vec![1, 248],
             action_shape: [24, 3],
             noise_shape: Some(vec![1, 24, 3]),
@@ -56,7 +56,7 @@ impl VlaRuntime for ModelRunner {
                 "kart_dp requires explicit initial noise".into(),
             ));
         };
-        if image.shape != [4, 3, 224, 294]
+        if image.shape != self.model.image.shape()
             || r.state.shape != [1, 248]
             || noise.shape != [1, 24, 3]
             || image

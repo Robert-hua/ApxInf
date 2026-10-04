@@ -345,3 +345,58 @@ fn block_reduction_contract_rejects_invalid_affine_and_scale() {
     assert!(ctx.layer_norm_block(&x,&w,&w,0.).is_err());
     assert!(ctx.softmax_block(&x,f32::NAN).is_err());
 }
+
+#[test]
+fn isolated_fp16_linear_and_temporal_convolutions_match_rounded_reference() {
+    use half::f16;
+    let ctx=Context::new(0).unwrap();
+    let rounded=|x:f32|f16::from_f32(x).to_f32() as f64;
+    let xv=(0..15).map(|i|(i as f32-7.)/13.).collect::<Vec<_>>();
+    let wv=(0..20).map(|i|(i as f32-9.)/17.).collect::<Vec<_>>();
+    let x=ctx.tensor(&[3,5],&xv).unwrap();let w=ctx.tensor(&[4,5],&wv).unwrap();
+    let bias=ctx.tensor(&[4],&[0.1,-0.2,0.3,-0.4]).unwrap();
+    let (y,op)=ctx.linear_fp16(&x,&w,Some(&bias)).unwrap();op.run().unwrap();
+    let mut gold=vec![0.;12];
+    for i in 0..3 {for j in 0..4 {gold[i*4+j]=((0..5).map(|k|rounded(xv[i*5+k])*rounded(wv[j*5+k])).sum::<f64>()+[0.1f32,-0.2,0.3,-0.4][j] as f64) as f32;}}
+    close(&y.read().unwrap(),&gold,1e-6);
+    for transpose in [false,true] {
+        let (batch,ci,co,length,kernel,stride,pad)=(2,3,4,7,4,2,1);
+        let out=if transpose{(length-1)*stride+kernel-2*pad}else{(length+2*pad-kernel)/stride+1};
+        let xv=(0..batch*ci*length).map(|i|(i as f32%19.-9.)/13.).collect::<Vec<_>>();
+        let wv=(0..ci*co*kernel).map(|i|(i as f32%13.-6.)/17.).collect::<Vec<_>>();
+        let x=ctx.zeros(&[batch,ci,length]).unwrap();x.write(&xv).unwrap();
+        let w=ctx.tensor(&[if transpose{ci}else{co},if transpose{co}else{ci},kernel],&wv).unwrap();
+        let b=ctx.tensor(&[co],&vec![0.125;co]).unwrap();
+        let (y,op)=ctx.conv1d_fp16(&x,&w,Some(&b),stride,pad,transpose).unwrap();
+        let mut gold=vec![0.;batch*co*out];
+        for ib in 0..batch {for oc in 0..co {for t in 0..out {
+            let mut sum=0.125f64;
+            for ic in 0..ci {for k in 0..kernel {
+                let pos=if transpose {let q=t as isize+pad as isize-k as isize;if q<0||q%stride as isize!=0{continue;}q/stride as isize}else{(t*stride+k) as isize-pad as isize};
+                if pos<0||pos>=length as isize{continue;}
+                let wi=if transpose{(ic*co+oc)*kernel+k}else{(oc*ci+ic)*kernel+k};
+                sum+=rounded(xv[(ib*ci+ic)*length+pos as usize])*rounded(wv[wi]);
+            }}gold[(ib*co+oc)*out+t]=sum as f32;
+        }}}
+        op.run().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+        let graph=ctx.capture(&[op]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,2e-6);
+        x.write(&vec![0.;xv.len()]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.125;gold.len()],0.);
+    }
+}
+
+#[test]
+fn isolated_fp8_linear_pads_irregular_shapes_and_updates_graph_scales() {
+    let ctx=Context::new(0).unwrap();
+    let (m,n,k)=(2,3,17);
+    let xv=(0..m*k).map(|i|(i as f32%5.-2.)*224.).collect::<Vec<_>>();
+    let wv=(0..n*k).map(|i|(i as f32%5.-2.)*224.).collect::<Vec<_>>();
+    let x=ctx.zeros(&[m,k]).unwrap();x.write(&xv).unwrap();let w=ctx.tensor(&[n,k],&wv).unwrap();
+    let bias=ctx.tensor(&[n],&[1.,2.,3.]).unwrap();
+    let (y,op)=ctx.linear_fp8(&x,&w,Some(&bias)).unwrap();
+    let mut gold=vec![0.;m*n];
+    for i in 0..m {for j in 0..n {gold[i*n+j]=(0..k).map(|z|xv[i*k+z]*wv[j*k+z]).sum::<f32>()+(j+1) as f32;}}
+    op.run().unwrap();close(&y.read().unwrap(),&gold,0.);
+    let graph=ctx.capture(&[op]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,0.);
+    x.write(&vec![0.;m*k]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&[1.,2.,3.,1.,2.,3.],0.);
+    x.write(&xv).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,0.);
+}

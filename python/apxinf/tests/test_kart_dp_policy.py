@@ -40,3 +40,20 @@ def test_invalid_temporal_profile_noise_and_busy_are_rejected():
     try:
         with pytest.raises(RuntimeError,match='busy'):p.infer(ob)
     finally:p._lock.release()
+
+def test_explicit_external_vision_uses_raw_crop_and_owned_feature_handoff():
+    p=policy()
+    class Vision:
+        def infer(self,x):
+            self.input=x.copy()
+            return np.arange(24576,dtype=np.float32).reshape(1,-1)
+        def close(self):self.closed=True
+    vision=Vision();p.vision=vision
+    image=np.zeros((4,240,320,3),np.uint8);image[:,8:232,16:304]=255
+    p.infer({'observation.images.front':image,'observation.state':np.ones((4,62))})
+    assert vision.input.shape==(1,4,3,224,288)
+    np.testing.assert_array_equal(vision.input,np.ones_like(vision.input))
+    features,state,_=p.model_runner.inputs
+    np.testing.assert_array_equal(features,np.arange(24576,dtype=np.float32).reshape(1,-1))
+    np.testing.assert_array_equal(state,np.zeros((1,248)))
+    p.close();assert vision.closed

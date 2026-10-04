@@ -4,6 +4,7 @@
 #include <cudnn.h>
 #include <cublas_v2.h>
 #include <cublasLt.h>
+#include "low_precision.cuh"
 #include <memory>
 #include <string>
 #include <stdexcept>
@@ -33,6 +34,8 @@ struct Bf16Linear {
 struct Execution{Context*ctx{};apx_tensor_spec s{};const float*a{};const float*b{};const float*c{};float*y{};
  cudnnTensorDescriptor_t xdesc{},ydesc{};cudnnFilterDescriptor_t wdesc{};cudnnConvolutionDescriptor_t conv{};
  void*workspace{};size_t workspace_bytes{};
+ std::unique_ptr<apx_lowp::Execution> lowp;
+ std::unique_ptr<apx_lowp::Fp8Linear> fp8linear;
  std::unique_ptr<Bf16Linear> linear;std::unique_ptr<Fp8Conv> fp8;bool nchw=false;bool im2col_1d=false;bool bf16_im2row=false;int padded_columns=0;
  __nv_bfloat16*abf{};__nv_bfloat16*bbf{};__nv_bfloat16*ybf{};int an{},bn{},yn{};
  cudnnConvolutionFwdAlgo_t forward_algo=CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
@@ -40,6 +43,8 @@ struct Execution{Context*ctx{};apx_tensor_spec s{};const float*a{};const float*b
  ~Execution(){if(abf)cudaFree(abf);if(bbf)cudaFree(bbf);if(ybf)cudaFree(ybf);if(workspace)cudaFree(workspace);if(xdesc)cudnnDestroyTensorDescriptor(xdesc);if(ydesc)cudnnDestroyTensorDescriptor(ydesc);if(wdesc)cudnnDestroyFilterDescriptor(wdesc);if(conv)cudnnDestroyConvolutionDescriptor(conv);}};
 void enqueue(Execution&e){auto&p=e.s.p;auto&f=e.s.f;auto st=e.ctx->stream;float one=1.f,zero=0.f;
  if(e.abf&&!e.bf16_im2row){if((e.s.kind==1||e.s.kind==2)&&!e.nchw)apx_pack_nhwc<<<(e.an+255)/256,256,0,st>>>(e.an,p[1],p[2]*p[3],e.a,e.abf);else apx_to_bf16<<<(e.an+255)/256,256,0,st>>>(e.an,e.a,e.abf);if(e.s.kind==10)apx_to_bf16<<<(e.bn+255)/256,256,0,st>>>(e.bn,e.b,e.bbf);}
+ if(e.lowp){e.lowp->run();return;}
+ if(e.fp8linear){e.fp8linear->run();return;}
  switch(e.s.kind){
  case 0: // row-major Y[M,N] = A[M,K] W[N,K]^T
   if(e.linear){
@@ -116,6 +121,11 @@ extern "C" int apx_tensor_math_mode(void*c,int mode){return guard([&]{if(mode<0|
 extern "C" int apx_tensor_sync(void*c){return guard([&]{ck(cudaStreamSynchronize(static_cast<Context*>(c)->stream));});}
 extern "C" int apx_tensor_prepare(void*c,const apx_tensor_spec*s,const float*a,const float*b,const float*bias,float*y,void**out){*out=nullptr;return guard([&]{
  auto e=std::make_unique<Execution>();e->ctx=static_cast<Context*>(c);e->s=*s;e->a=a;e->b=b;e->c=bias;e->y=y;auto&p=e->s.p;
+ if(s->kind==18){e->fp8linear=std::make_unique<apx_lowp::Fp8Linear>(e->ctx->stream,p,a,b,bias,y);e->fp8linear->prepare();*out=e.release();return;}
+ if(s->kind>=15&&s->kind<=17){
+  e->lowp=std::make_unique<apx_lowp::Execution>(e->ctx->stream,s->kind,p,a,b,bias,y);
+  e->lowp->prepare();*out=e.release();return;
+ }
  const char*layout=std::getenv("APXINF_TENSOR_BF16_LAYOUT");
  const bool reference_layout=layout&&(std::strcmp(layout,"reference")==0||std::strcmp(layout,"reference_unet")==0);
  e->nchw=reference_layout&&(p[1]==3||(p[5]==1&&p[6]==1));
