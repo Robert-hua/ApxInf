@@ -275,3 +275,17 @@ fn explicit_bf16_convolution_in_fp8_context_preserves_precision_and_graph_lifeti
     let f32ctx=Context::new(0).unwrap();
     assert!(f32ctx.conv2d_with_precision(&rx,&rw,None,[1,1],[0,1],false,ConvPrecision::Bf16).is_err());
 }
+
+#[test]
+fn exact_gelu_matches_erf_golden_and_rebinds_graph_input() {
+    use apxinf_cuda_next::tensor_ops::Activation;
+    // Independent double precision erf definition, rounded to f32.
+    let input=[-8.,-3.,-1.,-0.1,0.,0.1,1.,3.,8.];
+    let golden=[-4.8849813e-15,-0.004049694,-0.15865526,-0.046017215,0.,0.053982783,0.8413448,2.9959502,8.];
+    let ctx=Context::new(0).unwrap();let x=ctx.zeros(&[9]).unwrap();x.write(&input).unwrap();
+    let (y,op)=ctx.activation(&x,Activation::Gelu).unwrap();op.run().unwrap();
+    close(&y.read().unwrap(),&golden,3e-7);
+    let graph=ctx.capture(&[op]).unwrap();let old=y.read().unwrap();
+    x.write(&[0.;9]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&[0.;9],0.);
+    close(&old,&golden,3e-7);
+}

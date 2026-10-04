@@ -110,6 +110,7 @@ That guard checks PI0.5 only; a new family must enforce its own declared boundar
 
 | Family / contract | Current organization and limits |
 | --- | --- |
+| Kart DP / tensor `VlaRuntime` seam | Independent `kart_dp/` config/weights/model/runner; DINOv2 ViT-S14, B1/To4, state62, action24x3, DDIM10 eta0, explicit f32 tensor input and eager/full graph. Original and EMA weight selection is explicit at export. Other precision/profile combinations are rejected; acceptance requires this family's own target-device evidence. See [Kart DP contract](kart-dp.md). |
 | ACT / Diffusion / tensor `VlaRuntime` seam | Family-local config/weights/model/model_runner; ResNet18, B1/To1, RGB360x640/state33/lxry2 only; `f32` default, experimental `bf16`/`tf32`; Diffusion additionally has experimental `fp8_dynamic` (aligned wide forward Conv1d E4M3, other math BF16/FP32, sm110 only); explicit tensor eager/whole-model graph. DDPM10/100 selected by checkpoint (100 training timesteps); noise [steps+1,56,2]. Historical DDPM100 BF16 diffusion numerical acceptance remains failed; see ApexForge reports. |
 | PI0.5 / `VlaRuntime` | `model/`, `model_runner/`, `weights/`; explicit preparation policy/status, stale-plan checks and retained-resource tests; `model_variant` selects `auto`, `bf16`, `fp8_static`, `int8_dynamic` |
 | Qwen-Drive / `VlaRuntime` | Planning-only `model/`, `model_runner/`, `weights/`; one BF16 Blocks file; direct/reasoning planning; local GDN graphs only, full `prepare` explicitly unsupported. See [family contract](qwen-drive-planning.md). |

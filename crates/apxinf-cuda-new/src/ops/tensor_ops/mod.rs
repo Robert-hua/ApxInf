@@ -598,6 +598,8 @@ pub enum Activation {
     Relu = 1,
     Mish = 2,
     Silu = 3,
+    /// Exact erf GELU (PyTorch approximate="none"). FP32 input/output.
+    Gelu = 9,
 }
 #[derive(Clone)]
 pub struct Tensor {

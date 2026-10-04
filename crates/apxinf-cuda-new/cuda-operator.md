@@ -175,3 +175,10 @@ context rejects this override. `ContextDefault` preserves `conv2d` behavior.
 The constraint is lowered as Conv spec p[14], fixed at prepare, retained by
 the operation and graph; it does not mutate context precision at replay.
 Model layer names and timestep schedules never enter the backend.
+
+`tensor_ops::Activation::Gelu` extends the prepared elementwise path with the
+exact-erf formula `0.5*x*(1+erf(x/sqrt(2)))` on FP32 storage. This is distinct
+from tanh-approximated GELU. It retains the existing prepare/run/capture lifetime;
+there is no allocation, host tensor computation or precision change during replay.
+The focused `exact_gelu_matches_erf_golden_and_rebinds_graph_input` test covers
+negative tails, zero, positive inputs, input rebinding and retained output.

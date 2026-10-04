@@ -28,3 +28,4 @@ from .qwen_drive import QwenDrivePolicy
 from .walloss import WallossPolicy
 
 __all__ = ["DiffusionPolicy", "ACTPolicy", "Pi05Policy", "Pi0FastPolicy", "Gr00tPolicy", "QwenDrivePolicy", "WallossPolicy"]
+from .kart_dp import KartDpPolicy

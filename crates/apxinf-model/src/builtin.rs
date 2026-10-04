@@ -18,6 +18,8 @@ pub fn register_builtin_models() {
     crate::act::register_builtin();
     #[cfg(feature = "cuda")]
     crate::diffusion::register_builtin();
+    #[cfg(feature = "cuda")]
+    crate::kart_dp::register_builtin();
     registry::register("llama", load_llama);
     registry::register("qwen3_vl", load_qwen3vl);
     registry::register("qwen3vl", load_qwen3vl);

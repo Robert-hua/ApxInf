@@ -5,6 +5,8 @@ mod accelerator;
 pub mod act;
 #[cfg(feature = "cuda")]
 pub mod diffusion;
+#[cfg(feature = "cuda")]
+pub mod kart_dp;
 pub mod auto;
 pub mod builtin;
 pub mod debug;

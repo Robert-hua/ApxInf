@@ -31,6 +31,7 @@ __global__ void apx_elementwise(int n,const float*a,const float*b,const float*c,
  case 6:y[i]=x+b[j];break;
  case 7:y[i]=x;break;
  case 8:y[i]=__bfloat162float(__float2bfloat16(x));break;
+ case 9:y[i]=(x*0.5f)*(1.f+erff(x*0.7071067811865475244f));break;
  }
 }
 __global__ void apx_normalize(int rows,int width,int channels,int spatial,const float*a,const float*w,const float*b,float*y,float eps) {
