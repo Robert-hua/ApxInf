@@ -224,6 +224,29 @@ The padded activation/output scratch is bounded to 64 MiB and Lt workspace to
 
 ### Opt-in high-accuracy prepared tensor operators
 
+Kind 27 / `linear_gelu_f16x3` composes exact-erf FP32 GELU with kind-19
+compensated Linear. It fuses activation and high/low splitting in a single
+elementwise kernel, preserving the existing GELU rounding order and avoiding
+the F32 activation intermediate. Inputs are contiguous F32, weights immutable
+`[N,K]`, optional bias `[N]`, with matching context and last input dimension K.
+Range and approximation limits are those of kind 19. Prepared resources and
+Graph ownership are unchanged; no environment selector or legacy redirect is
+introduced. Independent erf goldens, non-aligned shapes, the 1348x1536 MLP
+input, optional bias and Graph input refresh are covered by focused tests.
+
+Explicit `Operation::tune()` also supports compensated kinds 19/20/21/26/27.
+It measures the complete prepared operation under a temporary CUDA Graph,
+including activation/split or lowering and output restoration, against the
+existing cuBLAS fallback. Up to 32 cuBLASLt heuristic candidates are timed with
+FP16 operands and F32 accumulation/output; the final bias epilogue is retained.
+The chosen non-bias tactic handles HH/LH and, without bias fusion, HL. Search
+uses at most 4 MiB extra workspace; only the winner's required bytes are kept.
+No recipe is persisted. Enqueue only uses the chosen handle/algorithm/buffers;
+repeated tune is idempotent and cannot invalidate an already captured operation.
+`APXINF_TENSOR_TUNING_LOG=1` prints preparation diagnostics (shape, candidate,
+algorithm ID, workspace) without changing arithmetic. Different preparations
+may choose different legal reductions, so each model must pass its own gates.
+
 Kinds 19/20/21 expose `linear_f16x3` / `conv1d_f16x3`. Immutable weights are
 split into FP16 high plus a residual scaled by 1024 at preparation; activations
 are split every enqueue. Three products HH + (HL + LH)/1024 accumulate into

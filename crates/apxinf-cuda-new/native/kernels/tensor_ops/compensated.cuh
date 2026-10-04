@@ -4,6 +4,12 @@
 namespace apx_compensated {
 __device__ inline void parts(float v,__half&hi,__half&lo){hi=__float2half_rn(v);lo=__float2half_rn((v-__half2float(hi))*1024.f);}
 __global__ void split(int n,const float*x,__half*h,__half*l){int i=blockIdx.x*256+threadIdx.x;if(i<n)parts(x[i],h[i],l[i]);}
+// Preserve the standalone exact-erf GELU's FP32 operation order. In particular,
+// do not contract 1+erf or replace this with the cuBLAS tanh epilogue.
+__global__ void gelu_split(int n,const float*x,__half*h,__half*l){
+ int i=blockIdx.x*256+threadIdx.x;
+ if(i<n){float v=x[i];float g=__fmul_rn(__fmul_rn(v,0.5f),__fadd_rn(1.f,erff(__fmul_rn(v,0.7071067811865475244f))));parts(g,h[i],l[i]);}
+}
 __global__ void pack(int n,int co,int kernel,const float*w,__half*h,__half*l,float*f){
  int i=blockIdx.x*256+threadIdx.x;if(i>=n)return;int ci=n/(co*kernel),ic=i%ci,oc=(i/ci)/kernel,k=(i/ci)%kernel;
  float v=w[(ic*co+oc)*kernel+k];if(f)f[i]=v;else parts(v,h[i],l[i]);

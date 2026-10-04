@@ -87,7 +87,10 @@ impl VlaRuntime for ModelRunner {
             .try_borrow_mut()
             .map_err(|_| Error::Other("kart_dp busy".into()))?;
         *graph = None;
-        if policy != ExecutionPolicy::Eager {
+        // Fix the same prepared tactics before either execution mode. Tuning
+        // only during Graph preparation would compare untuned eager arithmetic
+        // with tuned Graph arithmetic when the user requests autotune.
+        if self.autotune || policy != ExecutionPolicy::Eager {
             self.model.forward().map_err(Error::Other)?;
             self.model.ctx.synchronize().map_err(Error::Other)?;
             if self.autotune {
@@ -97,6 +100,8 @@ impl VlaRuntime for ModelRunner {
             }
             self.model.forward().map_err(Error::Other)?;
             self.model.ctx.synchronize().map_err(Error::Other)?;
+        }
+        if policy != ExecutionPolicy::Eager {
             *graph = Some(
                 self.model
                     .ctx

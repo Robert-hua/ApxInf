@@ -166,8 +166,14 @@ impl Builder<'_> {
             let y=if self.fast {self.norm_linear(&x,&format!("{n}.norm2"),&format!("{n}.mlp.fc1"))?} else {
                 let y=self.norm(&x,&format!("{n}.norm2"),None)?;self.linear(&y,&format!("{n}.mlp.fc1"))?
             };
-            let y = self.act(&y, Activation::Gelu)?;
-            let y = self.linear(&y, &format!("{n}.mlp.fc2"))?;
+            let y = if self.fast {
+                let w = self.w.get(&format!("{n}.mlp.fc2.weight"))?;
+                let bias = self.w.get(&format!("{n}.mlp.fc2.bias"))?;
+                self.take(ctx.linear_gelu_f16x3(&y, &w, Some(&bias)))?
+            } else {
+                let y = self.act(&y, Activation::Gelu)?;
+                self.linear(&y, &format!("{n}.mlp.fc2"))?
+            };
             let gamma = self.w.get(&format!("{n}.ls2.gamma"))?;
             if self.fast {x=self.take(ctx.scaled_residual(&x,&y,&gamma))?;}
             else {let y=self.take(ctx.affine(&y,&gamma,&zeros,1))?;x=self.add(&x,&y)?;}

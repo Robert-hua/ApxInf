@@ -239,6 +239,13 @@ impl Context {
     pub fn linear_f16x3(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
         self.linear_lowp(x,w,bias,19)
     }
+    /// Exact-erf GELU followed by three-product compensated Linear. GELU and
+    /// hi/lo splitting share one kernel, retaining the standalone FP32 rounding
+    /// order without an intermediate F32 activation tensor. The compensated
+    /// products have the same approximation/range contract as linear_f16x3.
+    pub fn linear_gelu_f16x3(&self, x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<(Tensor, Operation)> {
+        self.linear_lowp(x,w,bias,27)
+    }
     /// LayerNorm then compensated Linear; params=[linear bias, norm weight, norm bias].
     /// Immutable F32 params and matrix, row width <=1024; no intermediate F32 norm tensor.
     pub fn linear_norm_f16x3(&self,x:&Tensor,w:&Tensor,params:&Tensor,eps:f32)->Result<(Tensor,Operation)>{

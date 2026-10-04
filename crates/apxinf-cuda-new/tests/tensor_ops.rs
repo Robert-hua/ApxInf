@@ -511,3 +511,87 @@ fn norm_compensated_linear_matches_f64_and_refreshes_graph_inputs() {
     }
     let large=ctx.zeros(&[65536,1,192]).unwrap();assert!(ctx.attention_qkv_f32(&large,1).is_err());
 }
+
+#[test]
+fn gelu_compensated_linear_matches_independent_golden_and_graph_updates() {
+    let ctx = Context::new(0).unwrap();
+    let values = [-8., -3., -1., -0.1, 0., 0.1, 1., 3., 8.];
+    // Independent double-precision erf definition, rounded to F32.
+    let gelu = [-4.8849813e-15f64, -0.004049694, -0.15865526, -0.046017215,
+                0., 0.053982783, 0.8413448, 2.9959502, 8.];
+    let (m, n, k) = (3, 7, values.len());
+    let weights = (0..n*k).map(|i| (i as f32 % 11. - 5.) / 32.).collect::<Vec<_>>();
+    let x = ctx.zeros(&[m, k]).unwrap();
+    let input = values.repeat(m);
+    x.write(&input).unwrap();
+    let w = ctx.tensor(&[n, k], &weights).unwrap();
+    let bias = ctx.tensor(&[n], &vec![0.125; n]).unwrap();
+    for b in [None, Some(&bias)] {
+        let offset = if b.is_some() {0.125} else {0.};
+        let gold = (0..m*n).map(|i| (offset + (0..k)
+            .map(|j| gelu[j] * weights[(i%n)*k+j] as f64).sum::<f64>()) as f32).collect::<Vec<_>>();
+        let (y, op) = ctx.linear_gelu_f16x3(&x, &w, b).unwrap();
+        op.run().unwrap();close(&y.read().unwrap(), &gold, 1e-6);
+        let graph = ctx.capture(&[op]).unwrap();
+        let held = y.read().unwrap();
+        x.write(&vec![0.;m*k]).unwrap();graph.replay().unwrap();
+        close(&y.read().unwrap(), &vec![offset as f32;m*n], 0.);
+        x.write(&input).unwrap();graph.replay().unwrap();
+        close(&y.read().unwrap(), &held, 0.);
+    }
+    let mutable = ctx.zeros(&[n,k]).unwrap();
+    assert!(ctx.linear_gelu_f16x3(&x,&mutable,None).is_err());
+    assert!(ctx.linear_gelu_f16x3(&x,&w,Some(&x)).is_err());
+    let other = Context::new(0).unwrap();
+    let foreign = other.tensor(&[n,k],&weights).unwrap();
+    assert!(ctx.linear_gelu_f16x3(&x,&foreign,None).is_err());
+}
+
+#[test]
+fn gelu_compensated_linear_real_shape_matches_unfused_bits() {
+    use apxinf_cuda_next::tensor_ops::Activation;
+    let ctx = Context::new(0).unwrap();
+    for (m,n,k) in [(17,31,257), (1348,384,1536)] {
+        let values = (0..m*k).map(|i| ((i*37%65521) as f32-32760.)/4096.).collect::<Vec<_>>();
+        let weights = (0..n*k).map(|i| ((i*13%101) as f32-50.)/4096.).collect::<Vec<_>>();
+        let x = ctx.tensor(&[m,k],&values).unwrap();
+        let w = ctx.tensor(&[n,k],&weights).unwrap();
+        let b = ctx.tensor(&[n],&vec![0.125;n]).unwrap();
+        let (g,gop) = ctx.activation(&x,Activation::Gelu).unwrap();
+        let (reference,rop) = ctx.linear_f16x3(&g,&w,Some(&b)).unwrap();
+        let (y,op) = ctx.linear_gelu_f16x3(&x,&w,Some(&b)).unwrap();
+        let ops = [gop,rop,op];run(&ops);
+        close(&y.read().unwrap(),&reference.read().unwrap(),0.);
+        let graph = ctx.capture(&ops).unwrap();graph.replay().unwrap();
+        close(&y.read().unwrap(),&reference.read().unwrap(),0.);
+    }
+}
+
+#[test]
+fn compensated_offline_tuning_preserves_f64_reference_and_graph_lifetime() {
+    let ctx=Context::new(0).unwrap();
+    for (m,n,k) in [(5,7,31),(16,768,2304),(32,384,1152)] {
+        let values=(0..m*k).map(|i|((i*13%101) as f32-50.)/128.).collect::<Vec<_>>();
+        let weights=(0..n*k).map(|i|((i*37%79) as f32-39.)/4096.).collect::<Vec<_>>();
+        let x=ctx.zeros(&[m,k]).unwrap();x.write(&values).unwrap();
+        let w=ctx.tensor(&[n,k],&weights).unwrap();let b=ctx.tensor(&[n],&vec![0.125;n]).unwrap();
+        let(y,op)=ctx.linear_f16x3(&x,&w,Some(&b)).unwrap();op.run().unwrap();op.tune().unwrap();
+        let gold=(0..m*n).map(|i|(0.125+(0..k).map(|j|values[(i/n)*k+j] as f64*weights[(i%n)*k+j] as f64).sum::<f64>()) as f32).collect::<Vec<_>>();
+        op.run().unwrap();close(&y.read().unwrap(),&gold,5e-6);
+        let graph=ctx.capture(&[op.clone()]).unwrap();
+        // Repeated tune is a no-op; it cannot replace graph-owned resources.
+        op.tune().unwrap();
+        x.write(&vec![0.;m*k]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.125;m*n],0.);
+        x.write(&values).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&gold,5e-6);
+    }
+    for transpose in [false,true] {
+        let (ci,co,len,kernel)=(16,32,12,3);let out=if transpose{len+2}else{len};
+        let values=vec![0.125;ci*len];let weights=vec![0.0625;ci*co*kernel];
+        let x=ctx.zeros(&[1,ci,len]).unwrap();x.write(&values).unwrap();
+        let w=ctx.tensor(&[if transpose{ci}else{co},if transpose{co}else{ci},kernel],&weights).unwrap();
+        let(y,op)=ctx.conv1d_f16x3(&x,&w,None,1,if transpose{0}else{1},transpose).unwrap();
+        let gold=(0..co*out).map(|i|{let t=i%out;let overlaps=if transpose{(0..kernel).filter(|&j|t>=j&&t-j<len).count()}else{(0..kernel).filter(|&j|t+j>=1&&t+j<len+1).count()};overlaps as f32*ci as f32*0.125*0.0625}).collect::<Vec<_>>();
+        op.run().unwrap();op.tune().unwrap();op.run().unwrap();close(&y.read().unwrap(),&gold,0.);
+        let graph=ctx.capture(&[op]).unwrap();x.write(&vec![0.;ci*len]).unwrap();graph.replay().unwrap();close(&y.read().unwrap(),&vec![0.;co*out],0.);
+    }
+}

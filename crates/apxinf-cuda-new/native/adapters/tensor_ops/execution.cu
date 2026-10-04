@@ -132,7 +132,7 @@ extern "C" int apx_tensor_prepare(void*c,const apx_tensor_spec*s,const float*a,c
  auto e=std::make_unique<Execution>();e->ctx=static_cast<Context*>(c);e->s=*s;e->a=a;e->b=b;e->c=bias;e->y=y;auto&p=e->s.p;
  if(s->kind==24||s->kind==25){*out=e.release();return;}
  if(s->kind==23){ck(static_cast<cudaError_t>(apx_fmha_f32_prepare()));*out=e.release();return;}
- if((s->kind>=19&&s->kind<=22)||s->kind==26){e->compensated=std::make_unique<apx_compensated::Execution>(e->ctx->stream,s->kind,p,a,b,bias,y,s->f[0]);e->compensated->prepare();*out=e.release();return;}
+ if((s->kind>=19&&s->kind<=22)||s->kind==26||s->kind==27){e->compensated=std::make_unique<apx_compensated::Execution>(e->ctx->stream,s->kind,p,a,b,bias,y,s->f[0]);e->compensated->prepare();*out=e.release();return;}
  if(s->kind==18){e->fp8linear=std::make_unique<apx_lowp::Fp8Linear>(e->ctx->stream,p,a,b,bias,y);e->fp8linear->prepare();*out=e.release();return;}
  if(s->kind>=15&&s->kind<=17){
   e->lowp=std::make_unique<apx_lowp::Execution>(e->ctx->stream,s->kind,p,a,b,bias,y);
@@ -252,7 +252,8 @@ extern "C" void apx_tensor_graph_destroy(void*g){if(g)cudaGraphExecDestroy(stati
 // Explicit offline preparation using the most recent real activation buffers.
 // This is never called by enqueue or inside graph capture.
 extern "C" int apx_tensor_tune(void*raw){return guard([&]{
- auto&e=*static_cast<Execution*>(raw);if(e.s.kind!=1||e.im2col_1d||e.bf16_im2row||e.fp8)return;
+ auto&e=*static_cast<Execution*>(raw);if(e.compensated){e.compensated->tune();return;}
+ if(e.s.kind!=1||e.im2col_1d||e.bf16_im2row||e.fp8)return;
  auto&p=e.s.p;ck(cudaStreamSynchronize(e.ctx->stream));
  if(e.abf&&!e.nchw)apx_pack_nhwc<<<(e.an+255)/256,256,0,e.ctx->stream>>>(e.an,p[1],p[2]*p[3],e.a,e.abf);
  void*scratch=nullptr;constexpr size_t limit=64*1024*1024;ck(cudaMalloc(&scratch,limit));

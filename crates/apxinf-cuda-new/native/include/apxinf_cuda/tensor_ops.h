@@ -11,6 +11,7 @@
 // Kind 23: packed F32 QKV attention [B,S,3*H*64], scale 1/8, no mask.
 // Kind 24: warp LayerNorm (width <=1024); kind 25: scaled residual.
 // Kind 26: LayerNorm + kind 19; c=[linear bias N, norm weight K, norm bias K].
+// Kind 27: exact-erf GELU(a) + kind 19; p=[M,N,K], optional c=linear bias N.
 // Zero-initialized existing callers retain their original behavior.
 struct apx_tensor_spec { int32_t kind; int32_t p[24]; float f[4]; };
 extern "C" {
