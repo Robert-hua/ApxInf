@@ -15,15 +15,24 @@ pub(super) fn validate(path: &Path) -> Result<()> {
         ("obs_steps", json!(4)),
         ("state_dim", json!(62)),
         ("horizon", json!(24)),
-        ("image_shape", json!([224, 288, 3])),
         ("inference_steps", json!(10)),
         ("scheduler", json!("DDIM")),
         ("eta", json!(0)),
-        ("action_axes", json!(["steering", "throttle", "brake"])),
     ] {
         if v.get(k) != Some(&expected) {
             return Err(format!("unsupported kart_dp {k}: expected {expected}"));
         }
+    }
+    let shape=v.get("image_shape").ok_or("missing kart_dp image_shape")?;
+    if shape!=&json!([224,288,3]) && shape!=&json!([240,320,3]) {
+        return Err(format!("unsupported kart_dp image_shape: {shape}"));
+    }
+    let axes=v.get("action_axes").ok_or("missing kart_dp action_axes")?;
+    if axes!=&json!(["steering","throttle","brake"]) && axes!=&json!(["steering","ry"]) {
+        return Err(format!("unsupported kart_dp action_axes: {axes}"));
+    }
+    if (shape==&json!([240,320,3])) != (axes==&json!(["steering","ry"])) {
+        return Err("kart_dp image_shape and action_axes identify different model profiles".into());
     }
     Ok(())
 }

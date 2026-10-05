@@ -96,6 +96,46 @@ def test_fast_path_uploads_all_four_new_rgb_frames_and_noise():
     np.testing.assert_array_equal(p.model_runner.inputs[2],noise)
     np.testing.assert_allclose(p.model_runner.normalization[0],[.485,.456,.406])
 
+def test_1004_profile_keeps_full_frame_geometry_and_two_action_axes():
+    class TwoAxisRunner:
+        def infer_tensors(self,image,state,noise):
+            self.inputs=(image.copy(),state.copy(),noise.copy())
+            return np.tile(np.array([[-2.,2.]],np.float32),(24,1))
+        def prepare_tensors(self,mode): return mode
+    adapter={'state_mean':[0.]*62,'state_std':[1.]*62,'initial_noise':np.zeros((1,24,2)).tolist(),
+             'image_mean':[.5,.5,.5],'image_std':[.5,.5,.5]}
+    cfg={'action_axes':['steering','ry'],'weight_branch':'model','image_shape':[240,320,3]}
+    p=KartDpPolicy(cfg,adapter,TwoAxisRunner(),model_variant='f32_fast')
+    image=np.zeros((4,240,320,3),np.uint8);image[:,:,:,0]=255
+    result=p.infer({'observation.images.front':image,'observation.state':np.zeros((4,62))})
+    x,_,noise=p.model_runner.inputs
+    assert x.shape==(4,3,252,322) and noise.shape==(1,24,2)
+    np.testing.assert_allclose(x[0,:,0,0],[1.,-1.,-1.])
+    assert result['prediction'].shape==(24,2)
+    np.testing.assert_array_equal(result['actions'][0],[-1.,1.])
+
+def test_1004_f32_fast_accepts_gpu_frames_padded_on_device():
+    class TwoAxisDeviceRunner:
+        def infer_device_pixels(self,images,state,mean,std,noise):
+            assert images is frames
+            assert all(x.__cuda_array_interface__['shape']==(252,320,3) for x in images)
+            assert state.shape==(1,248) and noise.shape==(1,24,2)
+            self.mean,self.std=mean,std
+            return np.zeros((24,2),np.float32)
+        def prepare_tensors(self,mode): return mode
+    class Frame:
+        def __init__(self):
+            self.__cuda_array_interface__={"version":3,"shape":(252,320,3),"typestr":"|u1",
+                "data":(123,True),"strides":None,"stream":None}
+    frames=[Frame() for _ in range(4)]
+    adapter={'state_mean':[0.]*62,'state_std':[1.]*62,'initial_noise':np.zeros((1,24,2)).tolist(),
+             'image_mean':[.485,.456,.406],'image_std':[.229,.224,.225]}
+    cfg={'action_axes':['steering','ry'],'weight_branch':'model','image_shape':[240,320,3]}
+    runner=TwoAxisDeviceRunner();p=KartDpPolicy(cfg,adapter,runner,model_variant='f32_fast')
+    result=p.infer({'observation.images.front':frames,'observation.state':np.zeros((4,62),np.float32)})
+    assert result['actions'].shape==(24,2)
+    np.testing.assert_allclose(runner.mean,[.485,.456,.406])
+
 def test_device_observation_retains_exporters_and_uses_normal_state_contract():
     p=policy();p._gpu_rgb=True
     class Frame:

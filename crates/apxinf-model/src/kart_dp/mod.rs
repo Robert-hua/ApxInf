@@ -35,13 +35,18 @@ fn load(
         true
     } else { false };
     config::validate(path).map_err(Error::Other)?;
+    let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(path.join("config.json"))?)
+        .map_err(|e|Error::Other(e.to_string()))?;
+    let action_dim=profile["action_axes"].as_array().ok_or_else(||Error::Other("missing action_axes".into()))?.len();
+    let image=profile["image_shape"].as_array().ok_or_else(||Error::Other("missing image_shape".into()))?;
+    let (image_h,image_w)=if image[0].as_u64()==Some(240) {(252,322)} else {(224,294)};
     let Device::Cuda(index) = device else {
         return Err(Error::Other("kart_dp requires CUDA".into()));
     };
     let ctx = apxinf_cuda_next::tensor_ops::Context::new(index).map_err(Error::Other)?;
     let mut weights = weights::Weights::load(path, &ctx).map_err(Error::Other)?;
     let variant = match options.model_variant.as_deref() {Some("f32_fast")=>"f32_fast",Some("f32_gemm")=>"f32_gemm",Some("f32_compensated")=>"f32_compensated",Some("fp16")=>"fp16",Some("fp8_policy")=>"fp8_policy",_=>"f32"};
-    let model = model::Model::build(ctx, &mut weights, variant, external_vision).map_err(Error::Other)?;
+    let model = model::Model::build(ctx, &mut weights, variant, external_vision, action_dim, image_h, image_w).map_err(Error::Other)?;
     Ok(LoadedModel::Vla(Box::new(model_runner::ModelRunner::new(
         model,
         options.autotune,

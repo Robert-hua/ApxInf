@@ -9,10 +9,13 @@ pub(super) struct Model {
     pub state: Tensor,
     pub noise: Tensor,
     pub output: Tensor,
+    pub action_dim: usize,
     pub operations: Vec<Operation>,
     pub diagnostics: Vec<(String, Tensor)>,
 }
 struct Builder<'a> {
+    patch_h: usize,
+    patch_w: usize,
     fp16: bool,
     compensated: bool,
     fast: bool,
@@ -125,7 +128,8 @@ impl Builder<'_> {
             [0, 0],
             false,
         )?;
-        let x = x.reshape(&[4, 384, 336])?;
+        let patch_count = self.patch_h * self.patch_w;
+        let x = x.reshape(&[4, 384, patch_count])?;
         let x = self.take(ctx.permute(&x, &[0, 2, 1]))?;
         let cls = self.w.get("native.cls_tokens")?;
         let mut x = self.take(ctx.concat(&cls, &x, 1))?;
@@ -133,6 +137,7 @@ impl Builder<'_> {
         x = self.add(&x, &pos)?;
         self.record("vision.tokens", &x);
         let zeros = ctx.tensor(&[384], &vec![0.; 384])?;
+        let sequence = 1 + patch_count;
         for i in 0..12 {
             let n = format!("{p}.blocks.{i}");
             let qkv=if self.fast {self.norm_linear(&x,&format!("{n}.norm1"),&format!("{n}.attn.qkv"))?} else {
@@ -143,20 +148,20 @@ impl Builder<'_> {
             for j in 0..3 {
                 let q = self
                     .take(ctx.slice(&qkv, 2, j * 384, 384))?
-                    .reshape(&[4, 337, 6, 64])?;
+                    .reshape(&[4, sequence, 6, 64])?;
                 pieces.push(
                     self.take(ctx.permute(&q, &[0, 2, 1, 3]))?
-                        .reshape(&[24, 337, 64])?,
+                        .reshape(&[24, sequence, 64])?,
                 );
             }
             let scores = self.take(ctx.bmm(&pieces[0], &pieces[1], true, 0.125))?;
             let probs = self.take(ctx.softmax_block(&scores, 1.))?;
             let y = self
                 .take(ctx.bmm(&probs, &pieces[2], false, 1.))?
-                .reshape(&[4, 6, 337, 64])?;
+                .reshape(&[4, 6, sequence, 64])?;
             let y = self
                 .take(ctx.permute(&y, &[0, 2, 1, 3]))?
-                .reshape(&[4, 337, 384])?;
+                .reshape(&[4, sequence, 384])?;
             y
             };
             let y = self.linear(&y, &format!("{n}.attn.proj"))?;
@@ -180,33 +185,33 @@ impl Builder<'_> {
             self.record(&format!("vision.block.{i}"), &x);
         }
         x = self.norm(&x, &format!("{p}.norm"), None)?;
-        x = self.take(ctx.slice(&x, 1, 1, 336))?;
+        x = self.take(ctx.slice(&x, 1, 1, patch_count))?;
         x = self
             .take(ctx.permute(&x, &[0, 2, 1]))?
-            .reshape(&[4, 384, 16, 21])?;
+            .reshape(&[4, 384, self.patch_h, self.patch_w])?;
         self.record("vision.patch_features", &x);
         x = self
             .conv(&x, "vision.proj", [1, 1], [0, 0], false)?
-            .reshape(&[4, 384, 336])?;
+            .reshape(&[4, 384, patch_count])?;
         // Adaptive 4x4 spatial means represented by a fixed sparse linear map.
-        let mut pool = vec![0f32; 16 * 336];
+        let mut pool = vec![0f32; 16 * patch_count];
         for iy in 0..4 {
             for ix in 0..4 {
                 let (y0, y1, x0, x1) = (
-                    iy * 16 / 4,
-                    ((iy + 1) * 16 + 3) / 4,
-                    ix * 21 / 4,
-                    ((ix + 1) * 21 + 3) / 4,
+                    iy * self.patch_h / 4,
+                    ((iy + 1) * self.patch_h + 3) / 4,
+                    ix * self.patch_w / 4,
+                    ((ix + 1) * self.patch_w + 3) / 4,
                 );
                 for y in y0..y1 {
                     for x in x0..x1 {
-                        pool[(iy * 4 + ix) * 336 + y * 21 + x] =
+                        pool[(iy * 4 + ix) * patch_count + y * self.patch_w + x] =
                             1. / ((y1 - y0) * (x1 - x0)) as f32;
                     }
                 }
             }
         }
-        let pw = ctx.tensor(&[16, 336], &pool)?;
+        let pw = ctx.tensor(&[16, patch_count], &pool)?;
         x = self.take(ctx.linear(&x, &pw, None))?;
         x = self
             .take(ctx.permute(&x, &[0, 2, 1]))?
@@ -260,12 +265,21 @@ impl Builder<'_> {
     }
 }
 impl Model {
-    pub fn build(ctx: Context, w: &mut Weights, variant: &'static str, external_vision: bool) -> Result<Self> {
-        let image = if external_vision {ctx.zeros(&[1,24576])?} else {ctx.zeros(&[4, 3, 224, 294])?};
-        let rgb=if matches!(variant,"f32_fast")&&!external_vision {Some(ctx.rgb_batch_processor(&image,288)?)} else {None};
+    pub fn build(ctx: Context, w: &mut Weights, variant: &'static str, external_vision: bool, action_dim: usize, image_h: usize, image_w: usize) -> Result<Self> {
+        let patch_h = image_h / 14;
+        let patch_w = image_w / 14;
+        let image = if external_vision {ctx.zeros(&[1,24576])?} else {ctx.zeros(&[4, 3, image_h, image_w])?};
+        let rgb=if matches!(variant,"f32_fast")&&!external_vision {
+            match (image_h,image_w) {
+                (224,294)=>Some(ctx.rgb_batch_processor(&image,288)?),
+                (252,322)=>Some(ctx.rgb_batch_processor(&image,320)?),
+                _=>None,
+            }
+        } else {None};
         let state = ctx.zeros(&[1, 248])?;
-        let noise = ctx.zeros(&[1, 24, 3])?;
+        let noise = ctx.zeros(&[1, 24, action_dim])?;
         let mut b = Builder {
+            patch_h, patch_w,
             fp16: matches!(variant,"fp16"|"fp8_policy"),
             compensated: matches!(variant,"f32_compensated"|"f32_fast"),
             fast: matches!(variant,"f32_fast"),
@@ -323,11 +337,11 @@ impl Model {
             b.record(&format!("epsilon.{i}"), &eps);
             // Preserve the DDIM reference operation boundaries before clipping x0.
             let eps_scaled = b.take(ctx.scale(&eps, coeff[i * 4], 0.))?;
-            let delta = ctx.zeros(&[1, 24, 3])?;
+            let delta = ctx.zeros(&[1, 24, action_dim])?;
             b.ops
                 .push(ctx.axpby_into(&sample, &eps_scaled, None, &delta, [1., -1., 0.], 0.)?);
             let x0 = b.take(ctx.scale(&delta, coeff[i * 4 + 1], 0.))?;
-            let clipped = ctx.zeros(&[1, 24, 3])?;
+            let clipped = ctx.zeros(&[1, 24, action_dim])?;
             b.ops
                 .push(ctx.axpby_into(&x0, &x0, None, &clipped, [1., 0., 0.], 1.)?);
             let a = b.take(ctx.scale(&clipped, coeff[i * 4 + 2], 0.))?;
@@ -344,6 +358,7 @@ impl Model {
             state,
             noise,
             output: sample,
+            action_dim,
             operations: b.ops,
             diagnostics: b.diagnostics,
         })

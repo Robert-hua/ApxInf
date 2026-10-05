@@ -23,7 +23,7 @@ impl VlaRuntime for ModelRunner {
     }
     fn contract(&self) -> VlaContract {
         VlaContract {
-            action_shape: [24, 3],
+            action_shape: [24, self.model.action_dim],
             patch_shape: [0, 0],
             max_token_len: 0,
             num_views: 1,
@@ -36,8 +36,8 @@ impl VlaRuntime for ModelRunner {
         Some(TensorProfile {
             image_shape: self.model.image.shape().to_vec(),
             state_shape: vec![1, 248],
-            action_shape: [24, 3],
-            noise_shape: Some(vec![1, 24, 3]),
+            action_shape: [24, self.model.action_dim],
+            noise_shape: Some(vec![1, 24, self.model.action_dim]),
         })
     }
     fn infer_tensors_host_f32(&self, r: &TensorRequest<'_>) -> Result<Vec<f32>> {
@@ -51,7 +51,7 @@ impl VlaRuntime for ModelRunner {
                 "kart_dp requires explicit initial noise".into(),
             ));
         };
-        if r.state.shape != [1,248] || noise.shape != [1,24,3]
+        if r.state.shape != [1,248] || noise.shape != [1,24,self.model.action_dim]
             || r.state.values.iter().chain(noise.values).any(|v|!v.is_finite()) {
             return Err(Error::Other("kart_dp state/noise profile mismatch".into()));
         }
@@ -67,7 +67,9 @@ impl VlaRuntime for ModelRunner {
                 self.model.image.write(image.values).map_err(Error::Other)?;
             }
             ImageTensor::RgbU8{shape,values,mean,std}=>{
-                if shape!=[4,224,288,3] {return Err(Error::Other("kart_dp RGB batch shape mismatch".into()));}
+                if self.model.rgb.is_none() {return Err(Error::Other("RGB upload requires native f32_fast on the original image profile".into()));}
+                let expected=[4,self.model.image.shape()[2],self.model.image.shape()[3].saturating_sub(2),3];
+                if shape!=expected {return Err(Error::Other("kart_dp RGB batch shape mismatch".into()));}
                 self.model.rgb.as_ref().ok_or_else(||Error::Other("RGB upload requires native f32_fast".into()))?
                     .write(values,mean,std).map_err(Error::Other)?;
             }

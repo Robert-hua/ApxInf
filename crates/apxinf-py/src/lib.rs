@@ -492,9 +492,16 @@ impl ModelRunner {
         state:PyReadonlyArrayDyn<'py,f32>,mean:[f32;3],std:[f32;3],
         noise:PyReadonlyArrayDyn<'py,f32>)->PyResult<Bound<'py,PyArray2<f32>>>{
         let runtime=self.model.vla().map_err(runtime_err)?;
-        if images.len()!=4 || state.shape()!=[1,248] || noise.shape()!=[1,24,3] {
-            return Err(PyValueError::new_err("device RGB requires four frames, state [1,248], noise [1,24,3]"));
+        let profile=runtime.tensor_profile().ok_or_else(||PyValueError::new_err("model has no vision/state profile"))?;
+        let [horizon,action_dim]=runtime.contract().action_shape;
+        if images.len()!=4 || state.shape()!=profile.state_shape || noise.shape()!=[1,horizon,action_dim] {
+            return Err(PyValueError::new_err(format!("device RGB requires four frames, state {:?}, noise [1,{horizon},{action_dim}]",profile.state_shape)));
         }
+        let output_image_shape=&profile.image_shape;
+        if output_image_shape.len()!=4 || output_image_shape[0]!=4 || output_image_shape[1]!=3 || output_image_shape[3]<2 {
+            return Err(PyValueError::new_err("invalid native RGB image profile"));
+        }
+        let frame_shape=[output_image_shape[2],output_image_shape[3]-2,3];
         let mut pointers=Vec::with_capacity(4);
         for owner in &images {
             let cai=owner.bind(py).getattr("__cuda_array_interface__")?;
@@ -503,8 +510,8 @@ impl ModelRunner {
             let version:i32=cai.get_item("version")?.extract()?;
             let strides=cai.call_method1("get",("strides",))?;
             let stream=cai.call_method1("get",("stream",))?;
-            if shape!=[224,288,3] || dtype!="|u1" || version!=3 || !strides.is_none() || !stream.is_none() {
-                return Err(PyValueError::new_err("expected producer-complete contiguous CUDA RGB uint8 [224,288,3], CAI v3 stream=None"));
+            if shape!=frame_shape || dtype!="|u1" || version!=3 || !strides.is_none() || !stream.is_none() {
+                return Err(PyValueError::new_err(format!("expected producer-complete contiguous CUDA RGB uint8 {frame_shape:?}, CAI v3 stream=None")));
             }
             let (ptr,_readonly):(usize,bool)=cai.get_item("data")?.extract()?;
             if ptr==0 {return Err(PyValueError::new_err("null CUDA RGB pointer"));}
@@ -512,7 +519,7 @@ impl ModelRunner {
         }
         // SAFETY: CAI exporters own the advertised allocations and are retained
         // in `images`. Their stream=None contract promises completed writes.
-        let source=unsafe {apxinf_model::vla::ReadyDeviceRgb::from_raw_frames(&pointers,224*288*3)};
+        let source=unsafe {apxinf_model::vla::ReadyDeviceRgb::from_raw_frames(&pointers,frame_shape[0]*frame_shape[1]*3)};
         let request=apxinf_model::vla::TensorRequest {
             image:apxinf_model::vla::ImageTensor::DeviceRgb{source:&source,mean,std},
             state:apxinf_model::vla::HostTensor{shape:state.shape(),values:state.as_slice().map_err(|_|PyValueError::new_err("state must be contiguous"))?},
