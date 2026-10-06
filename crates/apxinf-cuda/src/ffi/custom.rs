@@ -1325,6 +1325,15 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_add_bias_f32(
+        input: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        cols: u32,
+        rows: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_rope_vision_2d_bf16(
         input: *const c_void,
         output: *mut c_void,

@@ -582,6 +582,17 @@ extern "C" cudaError_t apxinf_add_bias_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_add_bias_f32(
+    const void* input, const void* bias, void* output,
+    uint32_t cols, uint32_t rows, void* stream)
+{
+    dim3 grid((cols + BLOCK_SIZE - 1) / BLOCK_SIZE, rows, 1);
+    dim3 block(BLOCK_SIZE, 1, 1);
+    add_bias_f32_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const float*)input, (const float*)bias, (float*)output, cols, rows);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_rope_vision_2d_bf16(
     const void* input, void* output,
     uint32_t head_dim, uint32_t n_heads, uint32_t seq_len,

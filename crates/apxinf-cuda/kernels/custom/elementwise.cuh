@@ -118,6 +118,16 @@ __global__ void add_bias_bf16_kernel(
     output[row * cols + col] = __float2bfloat16(x + b);
 }
 
+__global__ void add_bias_f32_kernel(
+    const float* input, const float* bias, float* output,
+    uint32_t cols, uint32_t rows)
+{
+    uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t row = blockIdx.y;
+    if (col >= cols || row >= rows) return;
+    output[row * cols + col] = input[row * cols + col] + bias[col];
+}
+
 
 
 

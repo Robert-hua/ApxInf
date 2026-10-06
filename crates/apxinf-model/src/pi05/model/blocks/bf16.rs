@@ -1,11 +1,12 @@
 //! Native-BF16 π0.5 transformer-layer computation.
 
 use crate::pi05::backend::{kernels, Context};
-use apxinf_core::{Error, Result, Tensor};
+use apxinf_core::{DType, Error, Result, Shape, Tensor};
 use kernels::{activation, attention, embedding, fused, gemm, norm, rope};
 
 use crate::pi05::{
     Bf16DeviceActionLayer, Bf16DeviceLanguageLayer, Bf16DeviceVisionBlock, Bf16LinearWeights,
+    F32LinearWeights,
     GemmaVariantConfig,
 };
 
@@ -18,6 +19,42 @@ pub struct Bf16LanguageLayerOutput {
 pub struct Bf16ActionLayerOutput {
     pub hidden: Tensor,
     pub next_normalized: Tensor,
+}
+
+fn device_tensor(ctx: &Context, shape: &[usize], dtype: DType) -> Result<Tensor> {
+    let elements: usize = shape.iter().product();
+    let bytes = elements
+        .checked_mul(dtype.size_in_bytes())
+        .ok_or_else(|| Error::Other("Pi0.5 tensor size overflow".into()))?;
+    kernels::scratch_buffer(ctx, bytes.max(1))?
+        .as_tensor(Shape::new(shape.to_vec()), dtype)
+        .map_err(Error::Cuda)
+}
+
+fn cast(ctx: &Context, input: &Tensor, dtype: DType) -> Result<Tensor> {
+    if input.dtype() == dtype {
+        return Ok(input.clone());
+    }
+    let output = device_tensor(ctx, input.shape().dims(), dtype)?;
+    match (input.dtype(), dtype) {
+        (DType::BF16, DType::F32) => {
+            kernels::linear_attention::cast_bf16_to_f32(ctx, input, &output)?
+        }
+        (DType::F32, DType::BF16) => {
+            kernels::linear_attention::cast_f32_to_bf16(ctx, input, &output)?
+        }
+        _ => return Err(Error::Other("Pi0.5 only supports BF16/F32 casts".into())),
+    }
+    Ok(output)
+}
+
+fn f32_linear(ctx: &Context, input: &Tensor, weights: &F32LinearWeights) -> Result<Tensor> {
+    let input = cast(ctx, input, DType::F32)?;
+    let projected = gemm::matmul(ctx, &input, &weights.weight)?;
+    match weights.bias.as_ref() {
+        Some(bias) => kernels::elementwise::add_bias(ctx, &projected, bias),
+        None => Ok(projected),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,14 +416,11 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn conditioning(&self, time_embedding: &Tensor) -> Result<Tensor> {
-            let hidden = gemm::bf16(self.ctx(), time_embedding, &self.weights.time_mlp_in.weight)?;
-            let hidden = activation::bias_silu_bf16(
-                self.ctx(),
-                &hidden,
-                self.weights.time_mlp_in.bias.as_ref(),
-            )?;
-            let output = gemm::bf16(self.ctx(), &hidden, &self.weights.time_mlp_out.weight)?;
-            activation::bias_silu_bf16(self.ctx(), &output, self.weights.time_mlp_out.bias.as_ref())
+            let hidden = f32_linear(self.ctx(), time_embedding, &self.weights.time_mlp_in)?;
+            let hidden = activation::silu(self.ctx(), &hidden)?;
+            let output = f32_linear(self.ctx(), &hidden, &self.weights.time_mlp_out)?;
+            let output = activation::silu(self.ctx(), &output)?;
+            cast(self.ctx(), &output, DType::BF16)
         }
 
         fn modulation(&self, conditioning: &Tensor, weights: &Bf16LinearWeights) -> Result<Tensor> {
@@ -445,9 +479,8 @@ pub(in crate::pi05::model) mod backbone {
                     "π0.5 BF16 prefix/modulation depth mismatch".into(),
                 ));
             }
-            let hidden = gemm::bf16(self.ctx(), state, &self.weights.action_in.weight)?;
-            let mut hidden =
-                elementwise::bias_bf16(self.ctx(), &hidden, self.weights.action_in.bias.as_ref())?;
+            let hidden = f32_linear(self.ctx(), state, &self.weights.action_in)?;
+            let mut hidden = cast(self.ctx(), &hidden, DType::BF16)?;
             let mut attention_normalized = None;
             for index in 0..self.config.action_expert.depth {
                 let layer = &self.weights.action_layers[index];
@@ -477,12 +510,8 @@ pub(in crate::pi05::model) mod backbone {
             let hidden = attention_normalized.ok_or_else(|| {
                 Error::Other("π0.5 action expert must contain at least one layer".into())
             })?;
-            let velocity = gemm::bf16(self.ctx(), &hidden, &self.weights.action_out.weight)?;
-            let velocity = elementwise::bias_bf16(
-                self.ctx(),
-                &velocity,
-                self.weights.action_out.bias.as_ref(),
-            )?;
+            let velocity = f32_linear(self.ctx(), &hidden, &self.weights.action_out)?;
+            let velocity = cast(self.ctx(), &velocity, DType::BF16)?;
             elementwise::euler_update_bf16(self.ctx(), state, &velocity, dt)
         }
 

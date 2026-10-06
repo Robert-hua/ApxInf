@@ -94,8 +94,11 @@ pub fn mul_into(
 /// Broadcast-add a bias vector `[cols]` over rows of `input` `[rows, cols]`.
 /// bf16 only.
 pub fn add_bias(ctx: &CudaContext, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
-    if input.dtype() != DType::BF16 {
-        return Err(Error::Other("add_bias: only BF16 supported".into()));
+    if input.dtype() != DType::BF16 && input.dtype() != DType::F32 {
+        return Err(Error::Other("add_bias: only BF16/F32 supported".into()));
+    }
+    if bias.dtype() != input.dtype() {
+        return Err(Error::DTypeMismatch { expected: input.dtype(), got: bias.dtype() });
     }
     let device_id = ctx.device_id();
     let dims = input.shape().dims();
@@ -107,19 +110,16 @@ pub fn add_bias(ctx: &CudaContext, input: &Tensor, bias: &Tensor) -> Result<Tens
     };
     let out_buf = CudaBuffer::alloc_zeros(input.size_in_bytes(), device_id).map_err(Error::Cuda)?;
     unsafe {
-        let res = ffi::apxinf_add_bias_bf16(
-            gpu_ptr(input)?,
-            gpu_ptr(bias)?,
-            out_buf.ptr(),
-            cols as u32,
-            rows as u32,
-            ctx.stream().handle(),
-        );
+        let res = if input.dtype() == DType::BF16 {
+            ffi::apxinf_add_bias_bf16(gpu_ptr(input)?, gpu_ptr(bias)?, out_buf.ptr(), cols as u32, rows as u32, ctx.stream().handle())
+        } else {
+            ffi::apxinf_add_bias_f32(gpu_ptr(input)?, gpu_ptr(bias)?, out_buf.ptr(), cols as u32, rows as u32, ctx.stream().handle())
+        };
         ffi::check_cuda(res).map_err(Error::Cuda)?;
     }
     Ok(make_gpu_tensor(
         input.shape().clone(),
-        DType::BF16,
+        input.dtype(),
         device_id,
         out_buf,
     ))

@@ -23,6 +23,25 @@ mod linear {
         pub bias: Option<Tensor>,
     }
 
+    #[derive(Debug)]
+    pub struct F32LinearWeights {
+        pub weight: Tensor,
+        pub bias: Option<Tensor>,
+    }
+
+    impl F32LinearWeights {
+        pub fn from_host(linear: &LinearWeights, backend: &dyn Backend) -> Result<Self> {
+            Ok(Self {
+                weight: f32_to_device(&linear.weight, backend)?,
+                bias: linear
+                    .bias
+                    .as_ref()
+                    .map(|value| f32_to_device(value, backend))
+                    .transpose()?,
+            })
+        }
+    }
+
     impl Bf16LinearWeights {
         pub fn from_host(linear: &LinearWeights, backend: &dyn Backend) -> Result<Self> {
             Self::from_host_parts(&[linear], backend)
@@ -185,6 +204,19 @@ mod linear {
             .map(half::bf16::from_f32)
             .collect::<Vec<_>>();
         backend.to_device(&Tensor::from_bf16(tensor.shape().dims().to_vec(), &values)?)
+    }
+
+    pub fn f32_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
+        if tensor.dtype() != DType::F32 {
+            return Err(Error::Other(format!(
+                "Pi0.5 FP32 projection expects F32 tensor, got {}",
+                tensor.dtype()
+            )));
+        }
+        backend.to_device(&Tensor::from_f32(
+            tensor.shape().dims().to_vec(),
+            &tensor.to_f32_vec()?,
+        )?)
     }
 
     fn concat_biases_bf16(tensors: &[&Tensor], backend: &dyn Backend) -> Result<Tensor> {
@@ -370,10 +402,10 @@ pub struct Bf16Weights {
     pub language_final_norm_scale: Tensor,
     pub action_layers: Vec<Bf16DeviceActionLayer>,
     pub action_final_modulation: Bf16LinearWeights,
-    pub action_in: Bf16LinearWeights,
-    pub action_out: Bf16LinearWeights,
-    pub time_mlp_in: Bf16LinearWeights,
-    pub time_mlp_out: Bf16LinearWeights,
+    pub action_in: F32LinearWeights,
+    pub action_out: F32LinearWeights,
+    pub time_mlp_in: F32LinearWeights,
+    pub time_mlp_out: F32LinearWeights,
 }
 
 impl Bf16Weights {
@@ -417,10 +449,10 @@ impl Bf16Weights {
                 .map(|layer| Bf16DeviceActionLayer::from_host(layer, backend))
                 .collect::<Result<Vec<_>>>()?,
             action_final_modulation: modulation_to_device(&weights.action_final_norm, backend)?,
-            action_in: Bf16LinearWeights::from_host(&weights.action_in, backend)?,
-            action_out: Bf16LinearWeights::from_host(&weights.action_out, backend)?,
-            time_mlp_in: Bf16LinearWeights::from_host(&weights.time_mlp_in, backend)?,
-            time_mlp_out: Bf16LinearWeights::from_host(&weights.time_mlp_out, backend)?,
+            action_in: F32LinearWeights::from_host(&weights.action_in, backend)?,
+            action_out: F32LinearWeights::from_host(&weights.action_out, backend)?,
+            time_mlp_in: F32LinearWeights::from_host(&weights.time_mlp_in, backend)?,
+            time_mlp_out: F32LinearWeights::from_host(&weights.time_mlp_out, backend)?,
         })
     }
 }
